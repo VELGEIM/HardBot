@@ -1,23 +1,32 @@
 import asyncio
 import aiosqlite
 from datetime import datetime, timedelta
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
-import os
 
 # ================== CONFIG ==================
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+if not TOKEN:
+    raise Exception("❌ BOT_TOKEN is missing in Render ENV")
+
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 
 DB = "bot.db"
+
 
 # ================== DB ==================
 async def init_db():
@@ -25,7 +34,7 @@ async def init_db():
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            expire DATETIME
+            expire TEXT
         )
         """)
         await db.commit()
@@ -33,23 +42,31 @@ async def init_db():
 
 async def set_subscription(user_id: int, days: int = 30):
     expire = datetime.now() + timedelta(days=days)
+    expire_str = expire.isoformat()
 
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
         INSERT INTO users (user_id, expire)
         VALUES (?, ?)
         ON CONFLICT(user_id) DO UPDATE SET expire=excluded.expire
-        """, (user_id, expire))
+        """, (user_id, expire_str))
         await db.commit()
 
 
 async def get_subscription(user_id: int):
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT expire FROM users WHERE user_id=?", (user_id,)) as cur:
+        async with db.execute(
+            "SELECT expire FROM users WHERE user_id=?",
+            (user_id,)
+        ) as cur:
             row = await cur.fetchone()
             if not row:
                 return None
-            return datetime.fromisoformat(row[0])
+
+            try:
+                return datetime.fromisoformat(row[0])
+            except:
+                return None
 
 
 async def is_active(user_id: int):
@@ -68,53 +85,44 @@ def main_menu():
     ])
 
 
-def admin_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Дать подписку", callback_data="admin_add")],
-        [InlineKeyboardButton(text="📊 Пользователи", callback_data="admin_users")]
-    ])
-
-
-# ================== START ==================
-@dp.message(CommandStart())
-async def start(message: Message):
-    active = await is_active(message.from_user.id)
-
-    if not active:
-        await message.answer(
-            "❌ У тебя нет активной подписки\n\nКупи доступ ниже 👇",
-            reply_markup=main_menu()
-        )
-        return
-
-    await message.answer(
-        "✅ Добро пожаловать!\nТы в системе.",
-        reply_markup=main_menu()
-    )
-
-
-# ================== BLOCK SYSTEM ==================
-async def check_access(user_id: int):
-    if user_id == ADMIN_ID:
-        return True
-    return await is_active(user_id)
-
-
 def access_denied():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 Купить доступ", callback_data="buy")]
     ])
 
 
+# ================== START ==================
+@dp.message(CommandStart())
+async def start(message: Message):
+    if not await is_active(message.from_user.id):
+        await message.answer(
+            "❌ У тебя нет подписки\n\nКупи доступ ниже 👇",
+            reply_markup=main_menu()
+        )
+        return
+
+    await message.answer(
+        "✅ Добро пожаловать!\nТы в системе 🔥",
+        reply_markup=main_menu()
+    )
+
+
+# ================== ACCESS CHECK ==================
+async def check_access(user_id: int):
+    if user_id == ADMIN_ID:
+        return True
+    return await is_active(user_id)
+
+
 # ================== CALLBACKS ==================
 @dp.callback_query(F.data == "buy")
 async def buy(call: CallbackQuery):
     await call.message.edit_text(
-        "💎 Подписка:\n\n"
+        "💎 <b>Подписка</b>\n\n"
         "• 30 дней доступа\n"
         "• Полный функционал\n\n"
         "💰 Цена: 10€\n\n"
-        "После оплаты нажми 'Продлить'",
+        "После оплаты нажми кнопку ниже 👇",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Я оплатил", callback_data="paid")]
         ])
@@ -124,8 +132,8 @@ async def buy(call: CallbackQuery):
 @dp.callback_query(F.data == "extend")
 async def extend(call: CallbackQuery):
     await call.message.edit_text(
-        "⏳ Продление подписки:\n\n"
-        "Нажми кнопку после оплаты 👇",
+        "⏳ Продление подписки\n\n"
+        "Нажми после оплаты 👇",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✔ Продлить на 30 дней", callback_data="paid")]
         ])
@@ -137,7 +145,8 @@ async def paid(call: CallbackQuery):
     await set_subscription(call.from_user.id, 30)
 
     await call.message.edit_text(
-        "✅ Оплата подтверждена!\nПодписка активна на 30 дней 🔥"
+        "✅ <b>Оплата подтверждена!</b>\n"
+        "Подписка активна на 30 дней 🔥"
     )
 
 
@@ -148,7 +157,7 @@ async def status(call: CallbackQuery):
     if not expire:
         text = "❌ Подписки нет"
     else:
-        text = f"📅 Действует до: {expire.strftime('%Y-%m-%d %H:%M')}"
+        text = f"📅 Действует до: <b>{expire.strftime('%Y-%m-%d %H:%M')}</b>"
 
     await call.message.edit_text(text, reply_markup=main_menu())
 
@@ -158,10 +167,11 @@ async def status(call: CallbackQuery):
 async def admin(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("⚙ Админ панель", reply_markup=admin_menu())
+
+    await message.answer("⚙ Админ панель")
 
 
-# ================== PROTECTED CONTENT EXAMPLE ==================
+# ================== PROTECTED CONTENT ==================
 @dp.message(F.text == "content")
 async def content(message: Message):
     if not await check_access(message.from_user.id):
@@ -171,7 +181,7 @@ async def content(message: Message):
     await message.answer("🔥 Секретный контент открыт!")
 
 
-# ================== REMINDER SYSTEM ==================
+# ================== REMINDER ==================
 async def reminder_loop():
     while True:
         async with aiosqlite.connect(DB) as db:
@@ -188,18 +198,16 @@ async def reminder_loop():
                                 user_id,
                                 "⚠️ Подписка закончится через 3 дня!"
                             )
-
                     except:
                         pass
 
-        await asyncio.sleep(3600)  # каждый час
+        await asyncio.sleep(3600)
 
 
 # ================== MAIN ==================
 async def main():
     await init_db()
     asyncio.create_task(reminder_loop())
-
     await dp.start_polling(bot)
 
 
