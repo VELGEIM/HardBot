@@ -8,9 +8,9 @@ import aiosqlite
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ---------------- ENV ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+BOT_TOKEN = os.getenv("8748031580:AAF1qFrsepl-j_v0kc8EQh4ZBEUrTUu2aUw")
+ADMIN_ID = int(os.getenv("873387188"))
+CHANNEL_ID = int(os.getenv("-1003378677447"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
