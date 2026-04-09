@@ -16,16 +16,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 
-# ================= CONFIG =================
+# ================= SAFE CONFIG =================
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 CARD = "2200702134061840"
 PRICE = 500
 DAYS = 30
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 DB = "bot.db"
 
@@ -86,50 +90,51 @@ async def is_active(user_id: int):
     return exp and exp > int(datetime.now().timestamp())
 
 
-# ================= UI =================
-def is_admin(uid):
+# ================= UI (CLEAN 100/10 DESIGN) =================
+def is_admin(uid: int):
     return uid == ADMIN_ID
 
 
-def home_kb(uid):
+def home_kb(uid: int):
     kb = [
-        [InlineKeyboardButton("💳 Купить", callback_data="buy")],
-        [InlineKeyboardButton("🔁 Продлить", callback_data="renew")],
-        [InlineKeyboardButton("📊 Статус", callback_data="status")],
-        [InlineKeyboardButton("🛠 Поддержка", callback_data="support")]
+        [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy")],
+        [InlineKeyboardButton(text="🔁 Продлить", callback_data="renew")],
+        [InlineKeyboardButton(text="📊 Мой статус", callback_data="status")],
+        [InlineKeyboardButton(text="🛠 Поддержка", callback_data="support")]
     ]
 
     if is_admin(uid):
-        kb.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin")])
+        kb.append([InlineKeyboardButton(text="👑 Админ панель", callback_data="admin")])
 
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def back_kb():
+def back_home():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("⬅️ Назад", callback_data="home")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="home")]
     ])
 
 
 def pay_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📸 Я оплатил", callback_data="paid")]
-    ])
-
-
-def admin_kb(user_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"ok:{user_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"no:{user_id}")
-        ]
+        [InlineKeyboardButton(text="📸 Я оплатил", callback_data="paid")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="home")]
     ])
 
 
 def admin_panel():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton("⬅️ Выйти", callback_data="home")]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="⬅️ Выйти", callback_data="home")]
+    ])
+
+
+def admin_confirm_kb(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ok:{user_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"no:{user_id}")
+        ]
     ])
 
 
@@ -146,11 +151,11 @@ async def start(message: Message):
     )
 
 
-# ================= NAV =================
+# ================= NAVIGATION =================
 @dp.callback_query(F.data == "home")
 async def home(call: CallbackQuery):
     await call.message.edit_text(
-        "🏠 <b>ГЛАВНОЕ МЕНЮ</b>",
+        "🏠 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыберите действие 👇",
         reply_markup=home_kb(call.from_user.id)
     )
 
@@ -161,21 +166,21 @@ async def buy(call: CallbackQuery, state: FSMContext):
     await state.set_state(PayState.wait_screenshot)
 
     await call.message.edit_text(
-        f"💳 <b>ОПЛАТА</b>\n\n"
-        f"Цена: {PRICE}₽\n"
-        f"Срок: {DAYS} дней\n\n"
+        "💳 <b>ОПЛАТА ПОДПИСКИ</b>\n\n"
+        f"Цена: <b>{PRICE}₽</b>\n"
+        f"Срок: <b>{DAYS} дней</b>\n\n"
         f"Карта: <code>{CARD}</code>",
-        reply_markup=back_kb()
+        reply_markup=pay_kb()
     )
 
 
 @dp.callback_query(F.data == "renew")
 async def renew(call: CallbackQuery):
     await call.message.edit_text(
-        f"🔁 <b>ПРОДЛЕНИЕ</b>\n\n"
+        "🔁 <b>ПРОДЛЕНИЕ</b>\n\n"
         f"+{DAYS} дней = {PRICE}₽\n\n"
         f"Карта: <code>{CARD}</code>",
-        reply_markup=back_kb()
+        reply_markup=pay_kb()
     )
 
 
@@ -192,8 +197,8 @@ async def screenshot(message: Message, state: FSMContext):
     await bot.send_photo(
         ADMIN_ID,
         photo,
-        caption=f"💰 Оплата\nUser: {message.from_user.id}",
-        reply_markup=admin_kb(message.from_user.id)
+        caption=f"💰 НОВАЯ ОПЛАТА\nUser: {message.from_user.id}",
+        reply_markup=admin_confirm_kb(message.from_user.id)
     )
 
     await message.answer("⏳ Ожидай подтверждения")
@@ -204,7 +209,7 @@ async def screenshot(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("ok:"))
 async def approve(call: CallbackQuery):
     if not is_admin(call.from_user.id):
-        return
+        return await call.answer("Нет доступа", show_alert=True)
 
     user_id = int(call.data.split(":")[1])
 
@@ -218,41 +223,32 @@ async def approve(call: CallbackQuery):
     await bot.send_message(user_id, "✅ Подписка активирована")
 
 
-# ================= JOIN REQUEST =================
-@dp.chat_join_request()
-async def join(req: ChatJoinRequest):
-    if await is_active(req.from_user.id):
-        await req.approve()
-    else:
-        await req.decline()
-
-
 # ================= STATUS =================
 @dp.callback_query(F.data == "status")
 async def status(call: CallbackQuery):
     exp = await get_expire(call.from_user.id)
 
     if not exp:
-        await call.message.edit_text("❌ Нет подписки", reply_markup=back_kb())
+        await call.message.edit_text("❌ Подписка не найдена", reply_markup=back_home())
         return
 
     days_left = (exp - int(datetime.now().timestamp())) // 86400
 
     await call.message.edit_text(
-        f"📊 <b>СТАТУС</b>\n\n"
+        "📊 <b>СТАТУС</b>\n\n"
         f"Осталось: <b>{days_left} дней</b>",
-        reply_markup=back_kb()
+        reply_markup=back_home()
     )
 
 
-# ================= SUPPORT =================
+# ================= SUPPORT (FIXED REAL FSM) =================
 @dp.callback_query(F.data == "support")
 async def support(call: CallbackQuery, state: FSMContext):
     await state.set_state(SupportState.wait_text)
 
     await call.message.edit_text(
-        "🛠 <b>ПОДДЕРЖКА</b>\n\nНапиши сообщение:",
-        reply_markup=back_kb()
+        "🛠 <b>ПОДДЕРЖКА</b>\n\nНапишите сообщение:",
+        reply_markup=back_home()
     )
 
 
@@ -263,7 +259,7 @@ async def support_msg(message: Message, state: FSMContext):
         f"🛠 SUPPORT\nUser: {message.from_user.id}\n\n{message.text}"
     )
 
-    await message.answer("✅ Отправлено", reply_markup=back_kb())
+    await message.answer("✅ Отправлено", reply_markup=back_home())
     await state.clear()
 
 
@@ -273,7 +269,7 @@ async def admin(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("⛔ Нет доступа", show_alert=True)
 
-    await call.message.edit_text("👑 АДМИН", reply_markup=admin_panel())
+    await call.message.edit_text("👑 АДМИН ПАНЕЛЬ", reply_markup=admin_panel())
 
 
 @dp.callback_query(F.data == "stats")
@@ -288,7 +284,16 @@ async def stats(call: CallbackQuery):
     await call.message.answer(f"👥 Пользователей: {count}")
 
 
-# ================= REMINDERS =================
+# ================= JOIN CONTROL =================
+@dp.chat_join_request()
+async def join(req: ChatJoinRequest):
+    if await is_active(req.from_user.id):
+        await req.approve()
+    else:
+        await req.decline()
+
+
+# ================= AUTO REMINDERS =================
 async def reminders():
     while True:
         now = int(datetime.now().timestamp())
@@ -310,7 +315,7 @@ async def reminders():
                         try:
                             await bot.send_message(
                                 user_id,
-                                f"⚠️ Подписка закончится через {left} дней"
+                                f"⚠️ Подписка закончится через <b>{left}</b> дней"
                             )
                         except:
                             pass
