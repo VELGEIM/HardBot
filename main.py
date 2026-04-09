@@ -1,159 +1,208 @@
 import asyncio
-import logging
-import os
 import aiosqlite
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart
+from aiogram.enums import ParseMode
 
-# =====================
-# ENV
-# =====================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+import os
+
+# ================== CONFIG ==================
+TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-DB_PATH = "bot.db"
-
-# =====================
-# LOGGING
-# =====================
-logging.basicConfig(level=logging.INFO)
-
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-# =====================
-# DB INIT
-# =====================
+DB = "bot.db"
+
+
+# ================== DB ==================
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB) as db:
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            expire INTEGER
+            user_id INTEGER PRIMARY KEY,
+            expire DATETIME
         )
         """)
         await db.commit()
 
-# =====================
-# CHECK SUB
-# =====================
-async def is_active(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT expire FROM users WHERE id=?", (user_id,)) as cur:
-            row = await cur.fetchone()
-            if not row:
-                return False
-            return row[0] > int(asyncio.get_event_loop().time())
 
-# =====================
-# ADD SUB (ADMIN)
-# =====================
-async def add_sub(user_id: int, seconds: int):
-    expire = int(asyncio.get_event_loop().time()) + seconds
+async def set_subscription(user_id: int, days: int = 30):
+    expire = datetime.now() + timedelta(days=days)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB) as db:
         await db.execute("""
-        INSERT INTO users (id, expire)
+        INSERT INTO users (user_id, expire)
         VALUES (?, ?)
-        ON CONFLICT(id) DO UPDATE SET expire=excluded.expire
+        ON CONFLICT(user_id) DO UPDATE SET expire=excluded.expire
         """, (user_id, expire))
         await db.commit()
 
-# =====================
-# START
-# =====================
+
+async def get_subscription(user_id: int):
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT expire FROM users WHERE user_id=?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return datetime.fromisoformat(row[0])
+
+
+async def is_active(user_id: int):
+    expire = await get_subscription(user_id)
+    if not expire:
+        return False
+    return expire > datetime.now()
+
+
+# ================== UI ==================
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Купить подписку", callback_data="buy")],
+        [InlineKeyboardButton(text="⏳ Продлить", callback_data="extend")],
+        [InlineKeyboardButton(text="📦 Мой статус", callback_data="status")]
+    ])
+
+
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Дать подписку", callback_data="admin_add")],
+        [InlineKeyboardButton(text="📊 Пользователи", callback_data="admin_users")]
+    ])
+
+
+# ================== START ==================
 @dp.message(CommandStart())
-async def start(msg: Message):
-    await msg.answer(
-        "👋 Привет!\n\n"
-        "Этот бот выдаёт доступ после оплаты.\n"
-        "Напиши /buy чтобы получить доступ."
+async def start(message: Message):
+    active = await is_active(message.from_user.id)
+
+    if not active:
+        await message.answer(
+            "❌ У тебя нет активной подписки\n\nКупи доступ ниже 👇",
+            reply_markup=main_menu()
+        )
+        return
+
+    await message.answer(
+        "✅ Добро пожаловать!\nТы в системе.",
+        reply_markup=main_menu()
     )
 
-# =====================
-# BUY (заглушка оплаты)
-# =====================
-@dp.message(Command("buy"))
-async def buy(msg: Message):
-    await msg.answer(
-        "💳 Оплата:\n\n"
-        "После оплаты админ выдаст доступ.\n"
-        "Или напиши админу."
+
+# ================== BLOCK SYSTEM ==================
+async def check_access(user_id: int):
+    if user_id == ADMIN_ID:
+        return True
+    return await is_active(user_id)
+
+
+def access_denied():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Купить доступ", callback_data="buy")]
+    ])
+
+
+# ================== CALLBACKS ==================
+@dp.callback_query(F.data == "buy")
+async def buy(call: CallbackQuery):
+    await call.message.edit_text(
+        "💎 Подписка:\n\n"
+        "• 30 дней доступа\n"
+        "• Полный функционал\n\n"
+        "💰 Цена: 10€\n\n"
+        "После оплаты нажми 'Продлить'",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Я оплатил", callback_data="paid")]
+        ])
     )
 
-# =====================
-# CHECK ACCESS
-# =====================
-@dp.message(Command("check"))
-async def check(msg: Message):
-    active = await is_active(msg.from_user.id)
 
-    if active:
-        await msg.answer("✅ У тебя есть доступ")
+@dp.callback_query(F.data == "extend")
+async def extend(call: CallbackQuery):
+    await call.message.edit_text(
+        "⏳ Продление подписки:\n\n"
+        "Нажми кнопку после оплаты 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✔ Продлить на 30 дней", callback_data="paid")]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "paid")
+async def paid(call: CallbackQuery):
+    await set_subscription(call.from_user.id, 30)
+
+    await call.message.edit_text(
+        "✅ Оплата подтверждена!\nПодписка активна на 30 дней 🔥"
+    )
+
+
+@dp.callback_query(F.data == "status")
+async def status(call: CallbackQuery):
+    expire = await get_subscription(call.from_user.id)
+
+    if not expire:
+        text = "❌ Подписки нет"
     else:
-        await msg.answer("❌ Доступ не активен")
+        text = f"📅 Действует до: {expire.strftime('%Y-%m-%d %H:%M')}"
 
-# =====================
-# ADMIN PANEL
-# =====================
-@dp.message(Command("admin"))
-async def admin(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+    await call.message.edit_text(text, reply_markup=main_menu())
+
+
+# ================== ADMIN ==================
+@dp.message(F.text == "/admin")
+async def admin(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("⚙ Админ панель", reply_markup=admin_menu())
+
+
+# ================== PROTECTED CONTENT EXAMPLE ==================
+@dp.message(F.text == "content")
+async def content(message: Message):
+    if not await check_access(message.from_user.id):
+        await message.answer("⛔ Нет доступа", reply_markup=access_denied())
         return
 
-    await msg.answer(
-        "🛠 АДМИН ПАНЕЛЬ\n\n"
-        "/give ID DAYS - выдать доступ\n"
-        "/users - список пользователей"
-    )
+    await message.answer("🔥 Секретный контент открыт!")
 
-# =====================
-# GIVE SUB
-# =====================
-@dp.message(Command("give"))
-async def give(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
 
-    try:
-        _, user_id, days = msg.text.split()
-        user_id = int(user_id)
-        days = int(days)
+# ================== REMINDER SYSTEM ==================
+async def reminder_loop():
+    while True:
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("SELECT user_id, expire FROM users") as cur:
+                rows = await cur.fetchall()
 
-        await add_sub(user_id, days * 86400)
+                for user_id, expire in rows:
+                    try:
+                        exp = datetime.fromisoformat(expire)
+                        days_left = (exp - datetime.now()).days
 
-        await msg.answer(f"✅ Доступ выдан пользователю {user_id} на {days} дней")
+                        if days_left == 3:
+                            await bot.send_message(
+                                user_id,
+                                "⚠️ Подписка закончится через 3 дня!"
+                            )
 
-    except:
-        await msg.answer("❌ Используй: /give ID DAYS")
+                    except:
+                        pass
 
-# =====================
-# USERS LIST
-# =====================
-@dp.message(Command("users"))
-async def users(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
+        await asyncio.sleep(3600)  # каждый час
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, expire FROM users") as cur:
-            rows = await cur.fetchall()
 
-    text = "👥 USERS:\n\n"
-    for r in rows:
-        text += f"ID: {r[0]} | expire: {r[1]}\n"
-
-    await msg.answer(text)
-
-# =====================
-# MAIN
-# =====================
+# ================== MAIN ==================
 async def main():
     await init_db()
+    asyncio.create_task(reminder_loop())
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
