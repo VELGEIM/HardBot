@@ -20,7 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-CARD = "1234 5678 9012 3456"
+CARD = "2200702134061840"
 
 bot = Bot(
     token=TOKEN,
