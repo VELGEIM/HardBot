@@ -1,13 +1,13 @@
 import asyncio
 import aiosqlite
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatJoinRequest
+    ChatMemberUpdated
 )
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
@@ -16,7 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 
-# ================= SAFE CONFIG =================
+# ================= CONFIG =================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
@@ -25,11 +25,7 @@ CARD = "2200702134061840"
 PRICE = 500
 DAYS = 30
 
-bot = Bot(
-    token=TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 DB = "bot.db"
 
@@ -48,10 +44,11 @@ async def init_db():
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
             expire INTEGER
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
             user_id INTEGER,
@@ -59,29 +56,32 @@ async def init_db():
             PRIMARY KEY(user_id, stage)
         )
         """)
+        await db.commit()
 
+
+async def save_user(user: Message):
+    u = user.from_user
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+        INSERT OR REPLACE INTO users (user_id, username, first_name, expire)
+        VALUES (?, ?, ?, COALESCE((SELECT expire FROM users WHERE user_id=?), 0))
+        """, (u.id, u.username, u.first_name, u.id))
         await db.commit()
 
 
 async def set_user(user_id: int, days: int = DAYS):
-    expire = int(datetime.now().timestamp()) + days * 86400
-
+    expire = int((datetime.now() + timedelta(days=days)).timestamp())
     async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO users VALUES (?, ?)",
-            (user_id, expire)
-        )
+        await db.execute("""
+        UPDATE users SET expire=? WHERE user_id=?
+        """, (expire, user_id))
         await db.commit()
 
 
 async def get_expire(user_id: int):
     async with aiosqlite.connect(DB) as db:
-        async with db.execute(
-            "SELECT expire FROM users WHERE user_id=?",
-            (user_id,)
-        ) as cur:
+        async with db.execute("SELECT expire FROM users WHERE user_id=?", (user_id,)) as cur:
             row = await cur.fetchone()
-
     return row[0] if row else None
 
 
@@ -90,26 +90,39 @@ async def is_active(user_id: int):
     return exp and exp > int(datetime.now().timestamp())
 
 
+async def get_all_users():
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT * FROM users") as cur:
+            return await cur.fetchall()
+
+
+# ================= UNIQUE LINK =================
+async def create_unique_link():
+    link = await bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        member_limit=1,
+        expire_date=datetime.now() + timedelta(minutes=15)
+    )
+    return link.invite_link
+
+
 # ================= UI =================
-def is_admin(uid: int):
-    return uid == ADMIN_ID
+def is_admin(uid): return uid == ADMIN_ID
 
 
-def home_kb(uid: int):
+def home_kb(uid):
     kb = [
-        [InlineKeyboardButton(text="💳 Купить подписку", callback_data="buy")],
+        [InlineKeyboardButton(text="💳 Купить", callback_data="buy")],
         [InlineKeyboardButton(text="🔁 Продлить", callback_data="renew")],
-        [InlineKeyboardButton(text="📊 Мой статус", callback_data="status")],
+        [InlineKeyboardButton(text="📊 Статус", callback_data="status")],
         [InlineKeyboardButton(text="🛠 Поддержка", callback_data="support")]
     ]
-
     if is_admin(uid):
-        kb.append([InlineKeyboardButton(text="👑 Админ панель", callback_data="admin")])
-
+        kb.append([InlineKeyboardButton(text="👑 Админ", callback_data="admin")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def back_home():
+def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="home")]
     ])
@@ -124,16 +137,17 @@ def pay_kb():
 
 def admin_panel():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Пользователи", callback_data="users")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⬅️ Выйти", callback_data="home")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="home")]
     ])
 
 
-def admin_confirm_kb(user_id: int):
+def confirm_kb(uid):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"ok:{user_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"no:{user_id}")
+            InlineKeyboardButton(text="✅", callback_data=f"ok:{uid}"),
+            InlineKeyboardButton(text="❌", callback_data=f"no:{uid}")
         ]
     ])
 
@@ -141,22 +155,13 @@ def admin_confirm_kb(user_id: int):
 # ================= START =================
 @dp.message(CommandStart())
 async def start(message: Message):
+    await save_user(message)
+
     active = await is_active(message.from_user.id)
 
     await message.answer(
-        "🏠 <b>ЛИЧНЫЙ КАБИНЕТ</b>\n\n"
-        f"Статус: {'🟢 Активна' if active else '🔴 Нет подписки'}\n\n"
-        "Выбери действие 👇",
+        f"🏠 <b>Кабинет</b>\n\nСтатус: {'🟢 Активен' if active else '🔴 Нет'}",
         reply_markup=home_kb(message.from_user.id)
-    )
-
-
-# ================= NAVIGATION =================
-@dp.callback_query(F.data == "home")
-async def home(call: CallbackQuery):
-    await call.message.edit_text(
-        "🏠 <b>ГЛАВНОЕ МЕНЮ</b>",
-        reply_markup=home_kb(call.from_user.id)
     )
 
 
@@ -166,7 +171,7 @@ async def buy(call: CallbackQuery, state: FSMContext):
     await state.set_state(PayState.wait_screenshot)
 
     await call.message.edit_text(
-        f"💳 <b>ОПЛАТА</b>\n\n{PRICE}₽ / {DAYS} дней\n\nКарта: <code>{CARD}</code>",
+        f"💳 Оплата {PRICE}₽\n\nКарта:\n<code>{CARD}</code>",
         reply_markup=pay_kb()
     )
 
@@ -174,29 +179,35 @@ async def buy(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "renew")
 async def renew(call: CallbackQuery):
     await call.message.edit_text(
-        f"🔁 {PRICE}₽ = {DAYS} дней\n\nКарта: <code>{CARD}</code>",
+        f"🔁 Продление {PRICE}₽ / {DAYS} дней\n\n<code>{CARD}</code>",
         reply_markup=pay_kb()
     )
 
 
 @dp.callback_query(F.data == "paid")
 async def paid(call: CallbackQuery):
-    await call.message.answer("📸 Отправь скрин оплаты")
+    await call.message.answer("📸 Пришли скрин")
 
 
 # ================= SCREENSHOT =================
 @dp.message(PayState.wait_screenshot, F.photo)
 async def screenshot(message: Message, state: FSMContext):
-    photo = message.photo[-1].file_id
+    user = message.from_user
 
     await bot.send_photo(
         ADMIN_ID,
-        photo,
-        caption=f"💰 ОПЛАТА\nUser: {message.from_user.id}",
-        reply_markup=admin_confirm_kb(message.from_user.id)
+        message.photo[-1].file_id,
+        caption=(
+            f"💰 <b>ОПЛАТА</b>\n\n"
+            f"ID: <code>{user.id}</code>\n"
+            f"@{user.username}\n"
+            f"{user.first_name}\n"
+            f"<a href='tg://user?id={user.id}'>Открыть</a>"
+        ),
+        reply_markup=confirm_kb(user.id)
     )
 
-    await message.answer("⏳ Ожидай подтверждения")
+    await message.answer("⏳ Жди подтверждения")
     await state.clear()
 
 
@@ -204,18 +215,18 @@ async def screenshot(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("ok:"))
 async def approve(call: CallbackQuery):
     if not is_admin(call.from_user.id):
-        return await call.answer("Нет доступа", show_alert=True)
+        return
 
     user_id = int(call.data.split(":")[1])
 
-    await set_user(user_id, DAYS)
+    await set_user(user_id)
 
-    try:
-        await bot.approve_chat_join_request(CHANNEL_ID, user_id)
-    except:
-        pass
+    link = await create_unique_link()
 
-    await bot.send_message(user_id, "✅ Подписка активирована")
+    await bot.send_message(
+        user_id,
+        f"✅ Доступ выдан!\n\n🔗 {link}\n\n⏳ 15 минут / 1 вход"
+    )
 
 
 # ================= STATUS =================
@@ -224,13 +235,13 @@ async def status(call: CallbackQuery):
     exp = await get_expire(call.from_user.id)
 
     if not exp:
-        return await call.message.edit_text("❌ Нет подписки", reply_markup=back_home())
+        return await call.message.edit_text("❌ Нет подписки", reply_markup=back_kb())
 
-    days_left = max(0, (exp - int(datetime.now().timestamp())) // 86400)
+    days = (exp - int(datetime.now().timestamp())) // 86400
 
     await call.message.edit_text(
-        f"📊 Осталось: <b>{days_left} дней</b>",
-        reply_markup=back_home()
+        f"📊 Осталось: {days} дней",
+        reply_markup=back_kb()
     )
 
 
@@ -238,20 +249,15 @@ async def status(call: CallbackQuery):
 @dp.callback_query(F.data == "support")
 async def support(call: CallbackQuery, state: FSMContext):
     await state.set_state(SupportState.wait_text)
-
-    await call.message.edit_text(
-        "🛠 Напишите сообщение",
-        reply_markup=back_home()
-    )
+    await call.message.edit_text("🛠 Напиши сообщение", reply_markup=back_kb())
 
 
 @dp.message(SupportState.wait_text)
 async def support_msg(message: Message, state: FSMContext):
     await bot.send_message(
         ADMIN_ID,
-        f"🛠 SUPPORT\nUser: {message.from_user.id}\n\n{message.text}"
+        f"🛠 SUPPORT\n{message.from_user.id}\n{message.text}"
     )
-
     await message.answer("✅ Отправлено")
     await state.clear()
 
@@ -260,37 +266,77 @@ async def support_msg(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "admin")
 async def admin(call: CallbackQuery):
     if not is_admin(call.from_user.id):
-        return await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await call.message.edit_text("👑 Админ", reply_markup=admin_panel())
 
-    await call.message.edit_text("👑 АДМИН", reply_markup=admin_panel())
+
+@dp.callback_query(F.data == "users")
+async def users(call: CallbackQuery):
+    rows = await get_all_users()
+
+    text = "👤 Пользователи\n\n"
+
+    for u in rows:
+        text += f"{u[2]} (@{u[1]})\n"
+
+    await call.message.answer(text)
 
 
 @dp.callback_query(F.data == "stats")
 async def stats(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
-        return
-
-    async with aiosqlite.connect(DB) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM users")
-        count = (await cur.fetchone())[0]
-
-    await call.message.answer(f"👥 USERS: {count}")
+    rows = await get_all_users()
+    await call.message.answer(f"👥 Всего: {len(rows)}")
 
 
-# ================= JOIN REQUEST (FIXED) =================
-@dp.chat_join_request()
-async def join(req: ChatJoinRequest):
-    user_id = req.from_user.id
+# ================= REMINDERS =================
+async def reminders():
+    while True:
+        now = int(datetime.now().timestamp())
 
-    if await is_active(user_id):
-        await bot.approve_chat_join_request(CHANNEL_ID, user_id)
-    else:
-        await bot.decline_chat_join_request(CHANNEL_ID, user_id)
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("SELECT user_id, expire FROM users") as cur:
+                users = await cur.fetchall()
+
+            for user_id, exp in users:
+                left = (exp - now) // 86400
+
+                if left in [3, 2, 1]:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            f"⚠️ Осталось {left} дней"
+                        )
+                    except:
+                        pass
+
+        await asyncio.sleep(3600)
+
+
+# ================= CLEANUP =================
+async def cleanup():
+    while True:
+        now = int(datetime.now().timestamp())
+
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("SELECT user_id, expire FROM users") as cur:
+                rows = await cur.fetchall()
+
+            for user_id, exp in rows:
+                if exp < now:
+                    try:
+                        await bot.ban_chat_member(CHANNEL_ID, user_id)
+                        await bot.unban_chat_member(CHANNEL_ID, user_id)
+                    except:
+                        pass
+
+        await asyncio.sleep(3600)
 
 
 # ================= MAIN =================
 async def main():
     await init_db()
+    asyncio.create_task(reminders())
+    asyncio.create_task(cleanup())
     await dp.start_polling(bot)
 
 
