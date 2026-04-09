@@ -20,13 +20,12 @@ from aiogram.fsm.state import State, StatesGroup
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+
 CARD = "2200702134061840"
+PRICE = 500
+DAYS = 30
 
-bot = Bot(
-    token=TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 DB = "bot.db"
 
@@ -39,47 +38,82 @@ class PayState(StatesGroup):
 # ================= DB =================
 async def init_db():
     async with aiosqlite.connect(DB) as db:
+
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             expire INTEGER
         )
         """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            user_id INTEGER,
+            stage INTEGER,
+            PRIMARY KEY(user_id, stage)
+        )
+        """)
+
         await db.commit()
 
 
-async def set_user(user_id: int, days: int = 30):
+async def set_user(user_id: int, days: int = DAYS):
     expire = int((datetime.now() + timedelta(days=days)).timestamp())
 
     async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-        INSERT OR REPLACE INTO users VALUES (?, ?)
-        """, (user_id, expire))
+        await db.execute(
+            "INSERT OR REPLACE INTO users VALUES (?, ?)",
+            (user_id, expire)
+        )
         await db.commit()
 
 
-async def is_active(user_id: int):
+async def get_expire(user_id: int):
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT expire FROM users WHERE user_id=?", (user_id,)) as cur:
+        async with db.execute(
+            "SELECT expire FROM users WHERE user_id=?",
+            (user_id,)
+        ) as cur:
             row = await cur.fetchone()
 
-    if not row:
-        return False
+    return row[0] if row else None
 
-    return int(row[0]) > int(datetime.now().timestamp())
+
+async def is_active(user_id: int):
+    exp = await get_expire(user_id)
+    if not exp:
+        return False
+    return exp > int(datetime.now().timestamp())
 
 
 # ================= UI =================
-def menu():
+def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Купить 500₽", callback_data="buy")],
-        [InlineKeyboardButton(text="📊 Статус", callback_data="status")]
+        [InlineKeyboardButton(text="💳 Купить", callback_data="buy")],
+        [InlineKeyboardButton(text="🔁 Продлить", callback_data="renew")],
+        [InlineKeyboardButton(text="📊 Статус", callback_data="status")],
+        [InlineKeyboardButton(text="🛠 Поддержка", callback_data="support")],
+        [InlineKeyboardButton(text="👑 Админ", callback_data="admin")]
     ])
 
 
-def paid_kb():
+def admin_panel():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="users")],
+        [InlineKeyboardButton(text="🔙 Выйти", callback_data="back")]
+    ])
+
+
+def pay_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📸 Я оплатил", callback_data="paid")]
+    ])
+
+
+def back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
 
 
@@ -95,11 +129,14 @@ def admin_kb(user_id):
 # ================= START =================
 @dp.message(CommandStart())
 async def start(message: Message):
-    if not await is_active(message.from_user.id) and message.from_user.id != ADMIN_ID:
-        await message.answer("❌ Доступ закрыт\nКупи подписку 👇", reply_markup=menu())
-        return
+    active = await is_active(message.from_user.id)
 
-    await message.answer("🔥 Добро пожаловать", reply_markup=menu())
+    await message.answer(
+        "🏠 <b>КАБИНЕТ</b>\n\n"
+        f"Статус: {'🟢 Активна' if active else '🔴 Нет подписки'}\n\n"
+        "Выбери действие 👇",
+        reply_markup=main_menu()
+    )
 
 
 # ================= BUY =================
@@ -107,10 +144,22 @@ async def start(message: Message):
 async def buy(call: CallbackQuery, state: FSMContext):
     await state.set_state(PayState.wait_screenshot)
 
-    await call.message.answer(
-        f"💳 Переведи 500₽ на карту:\n\n<b>{CARD}</b>\n\n"
-        "После оплаты нажми кнопку 👇",
-        reply_markup=paid_kb()
+    await call.message.edit_text(
+        f"💳 <b>ОПЛАТА</b>\n\n"
+        f"Цена: {PRICE}₽\n"
+        f"Срок: {DAYS} дней\n\n"
+        f"Карта: <code>{CARD}</code>",
+        reply_markup=pay_kb()
+    )
+
+
+@dp.callback_query(F.data == "renew")
+async def renew(call: CallbackQuery):
+    await call.message.edit_text(
+        f"🔁 <b>ПРОДЛЕНИЕ</b>\n\n"
+        f"+{DAYS} дней = {PRICE}₽\n\n"
+        f"Карта: <code>{CARD}</code>",
+        reply_markup=pay_kb()
     )
 
 
@@ -131,7 +180,7 @@ async def screenshot(message: Message, state: FSMContext):
         reply_markup=admin_kb(message.from_user.id)
     )
 
-    await message.answer("⏳ Ожидай подтверждения")
+    await message.answer("⏳ Ожидай проверки")
     await state.clear()
 
 
@@ -143,43 +192,106 @@ async def approve(call: CallbackQuery):
 
     user_id = int(call.data.split(":")[1])
 
-    await set_user(user_id, 30)
+    await set_user(user_id, DAYS)
 
     try:
         await bot.approve_chat_join_request(CHANNEL_ID, user_id)
     except:
         pass
 
-    await bot.send_message(user_id, "✅ Доступ выдан на 30 дней")
+    await bot.send_message(user_id, "✅ Подписка активирована")
     await call.message.edit_text("OK")
-
-
-# ================= JOIN REQUEST =================
-@dp.chat_join_request()
-async def join(request: ChatJoinRequest):
-    if await is_active(request.from_user.id):
-        await request.approve()
-    else:
-        await request.decline()
 
 
 # ================= STATUS =================
 @dp.callback_query(F.data == "status")
 async def status(call: CallbackQuery):
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT expire FROM users WHERE user_id=?", (call.from_user.id,)) as cur:
-            row = await cur.fetchone()
+    exp = await get_expire(call.from_user.id)
 
-    if not row:
-        await call.message.answer("❌ Нет подписки")
+    if not exp:
+        await call.message.edit_text("❌ Нет подписки")
         return
 
-    exp = datetime.fromtimestamp(row[0])
+    left = exp - int(datetime.now().timestamp())
 
-    await call.message.answer(f"📅 До: {exp}")
+    await call.message.edit_text(
+        f"📊 <b>СТАТУС</b>\n\n"
+        f"Осталось дней: {left // 86400}"
+    )
 
 
-# ================= AUTO CHECK =================
+# ================= ADMIN PANEL =================
+@dp.callback_query(F.data == "admin")
+async def admin(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return await call.answer("Нет доступа", show_alert=True)
+
+    await call.message.edit_text("👑 Админ-панель", reply_markup=admin_panel())
+
+
+@dp.callback_query(F.data == "stats")
+async def stats(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        users = (await cur.fetchone())[0]
+
+    await call.message.answer(f"👥 Пользователей: {users}")
+
+
+# ================= JOIN =================
+@dp.chat_join_request()
+async def join(req: ChatJoinRequest):
+    if await is_active(req.from_user.id):
+        await req.approve()
+    else:
+        await req.decline()
+
+
+# ================= AUTO REMINDERS =================
+async def reminders():
+    while True:
+        now = int(datetime.now().timestamp())
+
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("SELECT user_id, expire FROM users") as cur:
+                users = await cur.fetchall()
+
+            for user_id, exp in users:
+                left_days = (exp - now) // 86400
+
+                if left_days in [3, 2, 1]:
+
+                    # проверка чтобы не спамить
+                    check = await db.execute(
+                        "SELECT 1 FROM reminders WHERE user_id=? AND stage=?",
+                        (user_id, left_days)
+                    )
+                    exists = await check.fetchone()
+
+                    if not exists:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"⚠️ ВНИМАНИЕ\n\n"
+                                f"Твоя подписка закончится через <b>{left_days} дн.</b>"
+                            )
+                        except:
+                            pass
+
+                        await db.execute(
+                            "INSERT INTO reminders VALUES (?, ?)",
+                            (user_id, left_days)
+                        )
+
+            await db.commit()
+
+        await asyncio.sleep(3600)
+
+
+# ================= CLEANUP =================
 async def cleanup():
     while True:
         now = int(datetime.now().timestamp())
@@ -188,17 +300,17 @@ async def cleanup():
             async with db.execute("SELECT user_id, expire FROM users") as cur:
                 rows = await cur.fetchall()
 
-                for user_id, exp in rows:
-                    if exp < now:
-                        try:
-                            await bot.ban_chat_member(CHANNEL_ID, user_id)
-                            await bot.unban_chat_member(CHANNEL_ID, user_id)
-                        except:
-                            pass
+            for user_id, exp in rows:
+                if exp < now:
+                    try:
+                        await bot.ban_chat_member(CHANNEL_ID, user_id)
+                        await bot.unban_chat_member(CHANNEL_ID, user_id)
+                    except:
+                        pass
 
-                        await db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
+                    await db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
 
-                await db.commit()
+            await db.commit()
 
         await asyncio.sleep(3600)
 
@@ -207,6 +319,7 @@ async def cleanup():
 async def main():
     await init_db()
     asyncio.create_task(cleanup())
+    asyncio.create_task(reminders())
     await dp.start_polling(bot)
 
 
