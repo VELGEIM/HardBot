@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types, F
@@ -6,19 +7,21 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import aiosqlite
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ---------------- НАСТРОЙКИ ----------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-CHANNEL_ID = -1001234567890
-ADMIN_ID = 123456789
+# ---------------- ENV ----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Berlin")
 
-DB = "/var/data/bot.db"   # ✅ для Render Disk
+# ---------------- DB ----------------
+DB = "bot.db"
+
 waiting_for_screen = set()
 
-# ---------------- БАЗА ----------------
+# ---------------- INIT DB ----------------
 async def init_db():
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
@@ -38,7 +41,7 @@ async def set_user(user_id, expire_date):
         INSERT INTO users (user_id, expire_date)
         VALUES (?, ?)
         ON CONFLICT(user_id)
-        DO UPDATE SET 
+        DO UPDATE SET
             expire_date=excluded.expire_date,
             notified_3=0,
             notified_2=0,
@@ -48,17 +51,14 @@ async def set_user(user_id, expire_date):
 
 async def get_user(user_id):
     async with aiosqlite.connect(DB) as db:
-        cur = await db.execute(
-            "SELECT * FROM users WHERE user_id=?",
-            (user_id,)
-        )
+        cur = await db.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         return await cur.fetchone()
 
 # ---------------- UI ----------------
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Купить / Продлить — 500₽", callback_data="buy")],
-        [InlineKeyboardButton(text="📦 Моя подписка", callback_data="status")]
+        [InlineKeyboardButton(text="💳 Купить / Продлить", callback_data="buy")],
+        [InlineKeyboardButton(text="📦 Подписка", callback_data="status")]
     ])
 
 def buy_menu():
@@ -74,35 +74,37 @@ def renew_menu():
 # ---------------- START ----------------
 @dp.message(F.text == "/start")
 async def start(msg: types.Message):
+    user = await get_user(msg.from_user.id)
+
+    if not user:
+        await set_user(msg.from_user.id, None)
+
     await msg.answer(
-        "✨ <b>Добро пожаловать!</b>\n\n"
-        "📦 Закрытый канал\n"
-        "💰 Цена: <b>500₽ / 30 дней</b>",
+        "✨ <b>Добро пожаловать!</b>\n"
+        "💰 Подписка: 500₽ / 30 дней",
         reply_markup=main_menu(),
         parse_mode="HTML"
     )
 
-# ---------------- ПОКУПКА ----------------
+# ---------------- BUY ----------------
 @dp.callback_query(F.data == "buy")
 async def buy(call: types.CallbackQuery):
     await call.message.edit_text(
         "💳 <b>Оплата</b>\n\n"
-        "Переведи <b>500₽</b>\n"
-        "<code>XXXX-XXXX-XXXX</code>\n\n"
-        "После оплаты отправь скрин 👇",
+        "Переведи 500₽ и отправь скрин 👇",
         reply_markup=buy_menu(),
         parse_mode="HTML"
     )
 
-# ---------------- СКРИН ----------------
+# ---------------- SCREEN ----------------
 @dp.callback_query(F.data == "send_screen")
 async def send_screen(call: types.CallbackQuery):
     waiting_for_screen.add(call.from_user.id)
     await call.message.answer("📸 Отправь скрин оплаты")
 
-# ---------------- ПОЛУЧЕНИЕ ФОТО ----------------
+# ---------------- PHOTO ----------------
 @dp.message(F.photo)
-async def get_photo(msg: types.Message):
+async def photo(msg: types.Message):
     if msg.from_user.id not in waiting_for_screen:
         return
 
@@ -121,28 +123,24 @@ async def get_photo(msg: types.Message):
     await bot.send_photo(
         ADMIN_ID,
         photo,
-        caption=f"💰 Новый платёж\n👤 ID: {user_id}",
+        caption=f"💰 Оплата\nID: {user_id}",
         reply_markup=kb
     )
 
-    await msg.answer("⏳ Ожидай подтверждения")
+    await msg.answer("⏳ Ожидай проверки")
 
-# ---------------- ПОДТВЕРЖДЕНИЕ ----------------
+# ---------------- APPROVE ----------------
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve(call: types.CallbackQuery):
     user_id = int(call.data.split("_")[1])
 
     user = await get_user(user_id)
-
     now = datetime.now()
 
     if user and user[1]:
         try:
-            old_date = datetime.fromisoformat(user[1])
-            if old_date > now:
-                expire = old_date + timedelta(days=30)
-            else:
-                expire = now + timedelta(days=30)
+            old = datetime.fromisoformat(user[1])
+            expire = old + timedelta(days=30) if old > now else now + timedelta(days=30)
         except:
             expire = now + timedelta(days=30)
     else:
@@ -157,29 +155,21 @@ async def approve(call: types.CallbackQuery):
 
     await bot.send_message(
         user_id,
-        "🎉 <b>Доступ активирован!</b>\n\n"
-        f"📅 До: <b>{expire.date()}</b>\n\n"
-        f"🔗 {invite.invite_link}",
-        reply_markup=renew_menu(),
-        parse_mode="HTML"
+        f"🎉 Доступ открыт!\n📅 До: {expire.date()}\n\n🔗 {invite.invite_link}",
+        reply_markup=renew_menu()
     )
 
     await call.message.edit_caption("✅ Подтверждено")
 
-# ---------------- ОТКАЗ ----------------
+# ---------------- REJECT ----------------
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject(call: types.CallbackQuery):
     user_id = int(call.data.split("_")[1])
 
-    await bot.send_message(
-        user_id,
-        "❌ Платёж не подтверждён",
-        reply_markup=renew_menu()
-    )
-
+    await bot.send_message(user_id, "❌ Платёж отклонён")
     await call.message.edit_caption("❌ Отклонено")
 
-# ---------------- СТАТУС ----------------
+# ---------------- STATUS ----------------
 @dp.callback_query(F.data == "status")
 async def status(call: types.CallbackQuery):
     user = await get_user(call.from_user.id)
@@ -189,21 +179,17 @@ async def status(call: types.CallbackQuery):
         return
 
     try:
-        expire = datetime.fromisoformat(user[1])
+        exp = datetime.fromisoformat(user[1])
     except:
         await call.message.answer("❌ Ошибка данных")
         return
 
-    if datetime.now() > expire:
-        await call.message.answer("⛔ Подписка истекла", reply_markup=renew_menu())
+    if datetime.now() > exp:
+        await call.message.answer("⛔ Истекла", reply_markup=renew_menu())
     else:
-        await call.message.answer(
-            f"📦 Активна до: <b>{expire.date()}</b>",
-            reply_markup=renew_menu(),
-            parse_mode="HTML"
-        )
+        await call.message.answer(f"📦 До: {exp.date()}")
 
-# ---------------- ПРОВЕРКА ----------------
+# ---------------- CHECK ----------------
 async def check_users():
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT * FROM users")
@@ -211,8 +197,8 @@ async def check_users():
 
     now = datetime.now()
 
-    for user in users:
-        user_id, exp, n3, n2, n1 = user
+    for u in users:
+        user_id, exp, n3, n2, n1 = u
 
         if not exp:
             continue
@@ -224,7 +210,6 @@ async def check_users():
 
         days = (exp - now).days
 
-        # ❌ истёк
         if now > exp:
             try:
                 await bot.ban_chat_member(CHANNEL_ID, user_id)
@@ -232,158 +217,72 @@ async def check_users():
             except:
                 pass
 
-            await bot.send_message(
-                user_id,
-                "⛔ Доступ закончился",
-                reply_markup=renew_menu()
-            )
-
-        # 🔔 уведомления
         elif days <= 3 and n3 == 0:
-            await bot.send_message(user_id, "⚠️ Осталось 3 дня")
-            async with aiosqlite.connect(DB) as db:
-                await db.execute("UPDATE users SET notified_3=1 WHERE user_id=?", (user_id,))
-                await db.commit()
+            await bot.send_message(user_id, "⚠️ 3 дня осталось")
 
         elif days <= 2 and n2 == 0:
-            await bot.send_message(user_id, "⚠️ Осталось 2 дня")
-            async with aiosqlite.connect(DB) as db:
-                await db.execute("UPDATE users SET notified_2=1 WHERE user_id=?", (user_id,))
-                await db.commit()
+            await bot.send_message(user_id, "⚠️ 2 дня осталось")
 
         elif days <= 1 and n1 == 0:
-            await bot.send_message(user_id, "🚨 Последний день!")
-            async with aiosqlite.connect(DB) as db:
-                await db.execute("UPDATE users SET notified_1=1 WHERE user_id=?", (user_id,))
-                await db.commit()
+            await bot.send_message(user_id, "🚨 1 день остался")
 
-# ---------------- ЗАПУСК ----------------
-async def main():
-    await init_db()
-
-    scheduler.add_job(check_users, "interval", hours=6)
-    scheduler.start()
-
-    await dp.start_polling(bot)
-
-# ---------------- ADMIN PANEL ----------------
-
-def is_admin(user_id: int):
-    return user_id == ADMIN_ID
-
+# ---------------- ADMIN ----------------
+def is_admin(uid):
+    return uid == ADMIN_ID
 
 @dp.message(F.text == "/admin")
-async def admin_panel(msg: types.Message):
+async def admin(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
 
     await msg.answer(
-        "🛠 <b>АДМИН ПАНЕЛЬ</b>\n\n"
-        "/users — список пользователей\n"
-        "/adddays user_id days — добавить дни\n"
-        "/ban user_id — забанить\n"
-        "/unban user_id — разбанить",
-        parse_mode="HTML"
+        "/users\n/adddays id days\n/ban id\n/unban id"
     )
 
-
 @dp.message(F.text == "/users")
-async def users_list(msg: types.Message):
+async def users(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
 
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT user_id, expire_date FROM users")
-        users = await cur.fetchall()
+        data = await cur.fetchall()
 
-    text = "👥 <b>Пользователи:</b>\n\n"
+    text = "👥 USERS:\n"
+    for u in data[:30]:
+        text += f"{u[0]} - {u[1]}\n"
 
-    for u in users[:30]:  # ограничение
-        uid, exp = u
-
-        if not exp:
-            status = "❌ нет подписки"
-        else:
-            try:
-                exp_dt = datetime.fromisoformat(exp)
-                status = f"📅 {exp_dt.date()}"
-            except:
-                status = "⚠️ ошибка даты"
-
-        text += f"👤 {uid} — {status}\n"
-
-    await msg.answer(text, parse_mode="HTML")
-
+    await msg.answer(text)
 
 @dp.message(F.text.startswith("/adddays"))
-async def add_days(msg: types.Message):
+async def adddays(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return
 
-    try:
-        _, user_id, days = msg.text.split()
-        user_id = int(user_id)
-        days = int(days)
-    except:
-        await msg.answer("❌ Используй: /adddays user_id days")
-        return
+    _, uid, days = msg.text.split()
+    uid, days = int(uid), int(days)
 
-    user = await get_user(user_id)
+    user = await get_user(uid)
     now = datetime.now()
 
     if user and user[1]:
         try:
-            current = datetime.fromisoformat(user[1])
-            if current > now:
-                new_exp = current + timedelta(days=days)
-            else:
-                new_exp = now + timedelta(days=days)
+            exp = datetime.fromisoformat(user[1])
+            exp = exp + timedelta(days=days)
         except:
-            new_exp = now + timedelta(days=days)
+            exp = now + timedelta(days=days)
     else:
-        new_exp = now + timedelta(days=days)
+        exp = now + timedelta(days=days)
 
-    await set_user(user_id, new_exp.isoformat())
+    await set_user(uid, exp.isoformat())
+    await msg.answer("✅ Added")
 
-    await msg.answer(f"✅ Добавлено {days} дней пользователю {user_id}")
+# ---------------- START ----------------
+async def main():
+    await init_db()
+    scheduler.add_job(check_users, "interval", hours=6)
+    scheduler.start()
+    await dp.start_polling(bot)
 
-
-@dp.message(F.text.startswith("/ban"))
-async def ban_user(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-
-    try:
-        _, user_id = msg.text.split()
-        user_id = int(user_id)
-    except:
-        await msg.answer("❌ Используй: /ban user_id")
-        return
-
-    try:
-        await bot.ban_chat_member(CHANNEL_ID, user_id)
-        await msg.answer(f"🚫 Пользователь {user_id} забанен")
-    except:
-        await msg.answer("❌ Ошибка бана")
-
-
-@dp.message(F.text.startswith("/unban"))
-async def unban_user(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-
-    try:
-        _, user_id = msg.text.split()
-        user_id = int(user_id)
-    except:
-        await msg.answer("❌ Используй: /unban user_id")
-        return
-
-    try:
-        await bot.unban_chat_member(CHANNEL_ID, user_id)
-        await msg.answer(f"✅ Пользователь {user_id} разбанен")
-    except:
-        await msg.answer("❌ Ошибка разбана")
-        
 if __name__ == "__main__":
     asyncio.run(main())
