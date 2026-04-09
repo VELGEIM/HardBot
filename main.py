@@ -19,7 +19,6 @@ dp = Dispatcher()
 
 DB = "bot.db"
 
-
 # ================== DB ==================
 async def init_db():
     async with aiosqlite.connect(DB) as db:
