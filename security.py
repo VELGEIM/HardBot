@@ -1,14 +1,14 @@
 import time
-import db
 
-cache = {}
+user_last_action = {}
 
-def check_user(uid):
+
+def can_action(user_id: int) -> bool:
     now = time.time()
 
-    if uid in cache:
-        if now - cache[uid] < 5:
+    if user_id in user_last_action:
+        if now - user_last_action[user_id] < 3:
             return False
 
-    cache[uid] = now
+    user_last_action[user_id] = now
     return True
