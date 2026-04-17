@@ -1,4 +1,4 @@
-from aiogram import F, Router
+from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 import db
 
@@ -15,3 +15,17 @@ async def users(c: CallbackQuery):
     ])
 
     await c.message.edit_text("👥 USERS", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("ban:"))
+async def ban(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+    await db.execute("UPDATE users SET is_banned=1 WHERE user_id=$1", uid)
+    await c.answer("BANNED")
+
+
+@router.callback_query(F.data.startswith("unban:"))
+async def unban(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+    await db.execute("UPDATE users SET is_banned=0 WHERE user_id=$1", uid)
+    await c.answer("UNBANNED")
