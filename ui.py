@@ -1,38 +1,52 @@
+from datetime import datetime
+
+PRICE = 500
+DAYS = 30
+
+
 def home(name):
     return f"""
-🎬 <b>HARDHUB PREMIUM</b>
+🎬 <b>HARDHUB SAAS PANEL</b>
 
 Привет, <b>{name}</b>
 
-━━━━━━━━━━━━
+━━━━━━━━━━━━━━
 🔥 VIP Content System
 ⚡ Instant Access
-🛡 Secure CRM Access
-━━━━━━━━━━━━
+🛡 Secure Access Layer
+━━━━━━━━━━━━━━
 
-📌 Выберите действие:
+Выберите действие 👇
 """
+
+
+def status(active, exp):
+    if active:
+        return f"""
+🟢 <b>ACTIVE</b>
+
+⏳ До: <b>{datetime.fromtimestamp(exp).strftime('%d.%m.%Y')}</b>
+"""
+    return "🔴 <b>NO SUBSCRIPTION</b>"
 
 
 def pay():
-    return """
-💳 <b>PAYMENT SCREEN</b>
-
-💰 Подписка: PREMIUM
-📆 Доступ: 30 дней
-
-📸 Отправьте чек для проверки
-"""
-
-
-def dashboard(active, exp):
     return f"""
-📊 <b>USER DASHBOARD</b>
+💳 <b>PAYMENT</b>
 
-Статус: {'🟢 ACTIVE' if active else '🔴 OFF'}
-До: {exp}
+💰 Цена: {PRICE}₽
+📆 Дней: {DAYS}
+
+📸 Отправьте чек (фото)
 """
 
 
-def loading():
-    return ["⏳", "⏳.", "⏳..", "⏳..."]
+def anim():
+    return [
+        "⏳ проверка",
+        "⏳ проверка.",
+        "⏳ проверка..",
+        "⏳ проверка...",
+        "🔍 анализ",
+        "✅ готово"
+    ]
