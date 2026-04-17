@@ -1,24 +1,25 @@
 import asyncio
 import os
-from datetime import datetime
+import datetime
+import logging
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+from aiogram.types import *
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
 
 import db
 import ui
+import fx
 import crm
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "").split(",")))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+URL = os.getenv("PUBLIC_URL")
+CHANNEL = int(os.getenv("CHANNEL_ID"))
+PORT = int(os.getenv("PORT", 10000))
+
+ADMINS = set(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -27,113 +28,73 @@ dp = Dispatcher()
 # ================= START =================
 @dp.message(CommandStart())
 async def start(m: Message):
-    await db.upsert_user(m.from_user.id, m.from_user.username, m.from_user.first_name)
-
-    await m.answer(
-        ui.main_ui(m.from_user.first_name),
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="💎 Купить")],
-                [KeyboardButton(text="📊 Статус")],
-                [KeyboardButton(text="🆘 Поддержка")]
-            ],
-            resize_keyboard=True
-        )
-    )
+    await db.user(m.from_user.id)  # create check
+    await m.answer(ui.home(m.from_user.first_name))
 
 
-# ================= STATUS =================
+# ================= DASH =================
 @dp.message(F.text == "📊 Статус")
 async def status(m: Message):
-    u = await db.get_user(m.from_user.id)
-    exp = u["expire"] if u else 0
+    u = await db.user(m.from_user.id)
+    now = int(datetime.datetime.now().timestamp())
 
-    dt = datetime.fromtimestamp(exp).strftime("%d.%m.%Y") if exp else None
-
-    await m.answer(ui.status_ui(dt))
+    if u and u["expire"] > now:
+        await m.answer(ui.dashboard(True, u["expire"]))
+    else:
+        await m.answer(ui.dashboard(False, "—"))
 
 
 # ================= BUY =================
 @dp.message(F.text == "💎 Купить")
 async def buy(m: Message):
-    await m.answer(
-        "💳 Оплата\n💰 500₽\n📸 Отправьте ЧЕК ФОТОМ"
-    )
+    msg = await m.answer(ui.pay())
+
+    await fx.slide_transition(msg, "Переход в оплату")
 
 
-# ================= CHECK PHOTO + ANIMATION =================
+# ================= PHOTO CHECK =================
 @dp.message(F.photo)
-async def check(m: Message):
+async def photo(m: Message):
     msg = await m.answer("⏳ Обработка чека...")
 
-    await ui.loading(bot, m.chat.id, msg.message_id)
+    await fx.loading(msg, "Проверка платежа")
 
-    for admin in ADMIN_IDS:
-        await bot.send_photo(
-            admin,
-            m.photo[-1].file_id,
-            caption=f"💰 CHECK\nID: {m.from_user.id}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton("✅ OK", callback_data=f"ok:{m.from_user.id}"),
-                    InlineKeyboardButton("❌ NO", callback_data=f"no:{m.from_user.id}")
-                ]
-            ])
-        )
-
-    await msg.edit_text("📸 Чек отправлен")
+    for a in ADMINS:
+        await bot.send_photo(a, m.photo[-1].file_id,
+            caption=f"CHECK: {m.from_user.id}")
 
 
 # ================= APPROVE =================
 @dp.callback_query(F.data.startswith("ok:"))
-async def approve(c: CallbackQuery):
+async def ok(c: CallbackQuery):
     uid = int(c.data.split(":")[1])
-
-    msg = await c.message.edit_text("⚡ Активируем подписку...")
-
-    await ui.loading(bot, c.message.chat.id, msg.message_id)
-
-    now = int(datetime.now().timestamp())
-    expire = now + 30 * 86400
+    exp = int(datetime.datetime.now().timestamp()) + 30*86400
 
     async with db.pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET expire=$1, last_pay=$2 WHERE user_id=$3",
-            expire, now, uid
-        )
+        await conn.execute("UPDATE users SET expire=$1 WHERE user_id=$2", exp, uid)
 
-    await bot.send_message(uid, "✅ ПОДПИСКА АКТИВНА")
+    link = await bot.create_chat_invite_link(CHANNEL, member_limit=1)
 
-    await msg.edit_text("✅ APPROVED")
+    await bot.send_message(uid, f"🔥 ACCESS GRANTED\n{link.invite_link}")
 
 
-# ================= CRM =================
-@dp.message(F.text == "⚙️ Админ")
-async def admin(m: Message):
-    if m.from_user.id not in ADMIN_IDS:
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("👥 USERS", callback_data="adm:users")]
-    ])
-
-    await m.answer("⚙️ ADMIN PANEL", reply_markup=kb)
+# ================= WEBHOOK =================
+async def webhook(r):
+    data = await r.json()
+    update = Update.model_validate(data)
+    await dp.feed_update(bot, update)
+    return web.Response()
 
 
-@dp.callback_query(F.data == "adm:users")
-async def users(c: CallbackQuery):
-    await crm.users(c)
+async def start_app(app):
+    await db.init()
+    await bot.set_webhook(f"{URL}/webhook")
 
 
-# ================= RUN =================
-async def main():
-    await db.init_db()
-
-    crm.register_admins(ADMIN_IDS)
-
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+app = web.Application()
+app.router.add_post("/webhook", webhook)
+app.on_startup.append(start_app)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(app, host="0.0.0.0", port=PORT)
