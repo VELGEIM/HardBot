@@ -1,64 +1,35 @@
-from datetime import datetime
+import asyncio
 
-def main_menu(name):
+
+def main_ui(name):
     return (
         f"🔥 <b>HARDHUB PREMIUM</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"👋 Привет, <b>{name}</b>\n\n"
-        f"📦 Доступ к системе:\n"
-        f"• Закрытый контент\n"
-        f"• VIP канал\n"
-        f"• Поддержка 24/7\n\n"
+        f"👋 Привет, <b>{name}</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"👇 Выберите действие"
+        f"💎 VIP система доступа\n"
+        f"⚡ Авто-выдача подписки\n"
+        f"📡 Поддержка 24/7\n"
     )
-import asyncio
 
-async def loading_animation(bot, chat_id, message_id, base_text="Загрузка"):
+
+def status_ui(exp):
+    return f"🟢 ACTIVE\n⏳ до: {exp}" if exp else "🔴 NO ACCESS"
+
+
+async def loading(bot, chat_id, msg_id):
     frames = [
         "⏳ Загрузка.",
         "⏳ Загрузка..",
         "⏳ Загрузка...",
-        "⚡ Обработка данных",
-        "⚡ Проверка платежа",
-        "🔄 Финализация"
+        "⚡ Проверка",
+        "🔄 Обработка",
+        "🚀 Готово"
     ]
 
     for f in frames:
         try:
-            await bot.edit_message_text(
-                f"<b>{f}</b>",
-                chat_id=chat_id,
-                message_id=message_id
-            )
-            await asyncio.sleep(0.6)
+            await bot.edit_message_text(f"<b>{f}</b>", chat_id, msg_id)
+            await asyncio.sleep(0.5)
         except:
             pass
-
-def status_text(expire):
-    now = int(datetime.now().timestamp())
-
-    if expire > now:
-        days = (expire - now) // 86400
-        return (
-            "🟢 <b>ACTIVE SUBSCRIPTION</b>\n"
-            f"⏳ Осталось: <b>{days} дней</b>"
-        )
-
-    return "🔴 <b>NO ACTIVE SUBSCRIPTION</b>"
-
-
-def pay_text(price, card):
-    return (
-        "💳 <b>PAYMENT REQUIRED</b>\n"
-        "━━━━━━━━━━━━━━\n"
-        f"💰 Цена: <b>{price}₽</b>\n"
-        f"💳 Карта: <code>{card}</code>\n\n"
-        "📸 Отправьте <b>ФОТО ЧЕКА</b>\n"
-        "━━━━━━━━━━━━━━\n"
-        "⚡ Проверка вручную админом"
-    )
-
-
-def admin_panel():
-    return "⚙️ <b>ADMIN CRM PANEL</b>"
