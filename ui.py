@@ -6,7 +6,7 @@ DAYS = 30
 
 def home(name):
     return f"""
-🎬 <b>HARDHUB SAAS PANEL</b>
+🎬 <b>HARDHUB PREMIUM</b>
 
 Привет, <b>{name}</b>
 
@@ -23,11 +23,11 @@ def home(name):
 def status(active, exp):
     if active:
         return f"""
-🟢 <b>ACTIVE</b>
+🟢 <b>Подписка активная</b>
 
 ⏳ До: <b>{datetime.fromtimestamp(exp).strftime('%d.%m.%Y')}</b>
 """
-    return "🔴 <b>NO SUBSCRIPTION</b>"
+    return "🔴 <b>купите подписку</b>"
 
 
 def pay():
