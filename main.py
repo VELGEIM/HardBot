@@ -25,7 +25,7 @@ ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 DB = os.getenv("DATABASE_URL")
 
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # <-- FIXED
+PUBLIC_URL = os.getenv("PUBLIC_URL")
 PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
@@ -77,7 +77,7 @@ def kb(uid):
         k.append([KeyboardButton(text="⚙️ Админ")])
     return ReplyKeyboardMarkup(keyboard=k, resize_keyboard=True)
 
-# ================= INVITE (1 user = 1 link) =================
+# ================= INVITE =================
 async def create_invite(uid: int):
     link = await bot.create_chat_invite_link(
         CHANNEL_ID,
@@ -86,8 +86,10 @@ async def create_invite(uid: int):
     )
 
     conn = await db()
-    await conn.execute("UPDATE users SET invite=$1 WHERE user_id=$2",
-                       link.invite_link, uid)
+    await conn.execute(
+        "UPDATE users SET invite=$1 WHERE user_id=$2",
+        link.invite_link, uid
+    )
     await conn.close()
 
     return link.invite_link
@@ -130,15 +132,19 @@ async def buy(m: Message):
 # ================= ANTI ABUSE =================
 def can_buy(u):
     now = int(datetime.now().timestamp())
+
     if not u:
         return True
+
     if u["expire"] > now:
         return False
+
     if now - (u["last_pay"] or 0) < 86400 * 27:
         return False
+
     return True
 
-# ================= BUY HANDLER =================
+# ================= BUY =================
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_plan(c: CallbackQuery):
     plan = c.data.split(":")[1]
@@ -147,10 +153,10 @@ async def buy_plan(c: CallbackQuery):
     u = await get_user(c.from_user.id)
 
     if not can_buy(u):
-        return await c.answer("⛔ WAIT UNTIL EXPIRY + 27 DAYS", show_alert=True)
+        return await c.answer("⛔ WAIT", show_alert=True)
 
     await c.message.edit_text(
-        f"💳 {p['rub']}₽ / ⭐ {p['stars']}\n\n📸 SEND PHOTO ONLY (NO FILE/PDF)"
+        f"💳 {p['rub']}₽ / ⭐ {p['stars']}\n📸 SEND PHOTO ONLY"
     )
 
 # ================= PAYMENT SUCCESS =================
@@ -178,25 +184,25 @@ async def payment_success(uid, plan, rub=0, stars=0):
 
     for admin in ADMIN_IDS:
         await bot.send_message(admin,
-            f"💰 PAYMENT\nID:{uid}\nPLAN:{plan}\n₽:{rub} ⭐:{stars}"
+            f"💰 PAYMENT\nID:{uid}\nPLAN:{plan}"
         )
 
     await bot.send_message(uid,
-        f"✅ PAID\n\n🔗 {invite}\n⚠️ 1 user = 1 invite"
+        f"✅ PAID\n🔗 {invite}"
     )
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN =================
 @dp.message(F.text == "⚙️ Админ")
 async def admin(m: Message):
     if m.from_user.id not in ADMIN_IDS:
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 DASH", callback_data="adm:dash")],
-        [InlineKeyboardButton(text="👥 USERS", callback_data="adm:users")]
+        [InlineKeyboardButton("DASH", callback_data="adm:dash")],
+        [InlineKeyboardButton("USERS", callback_data="adm:users")]
     ])
 
-    await m.answer("⚙️ ADMIN PANEL", reply_markup=kb)
+    await m.answer("ADMIN", reply_markup=kb)
 
 # ================= DASH =================
 @dp.callback_query(F.data == "adm:dash")
@@ -209,7 +215,7 @@ async def dash(c: CallbackQuery):
 
     await conn.close()
 
-    await c.message.edit_text(f"📊 DASH\n👥 {total}\n🟢 {active}")
+    await c.message.edit_text(f"📊 {total} / 🟢 {active}")
 
 # ================= USERS =================
 @dp.callback_query(F.data == "adm:users")
@@ -219,41 +225,16 @@ async def users(c: CallbackQuery):
     await conn.close()
 
     kb = []
-    text = "👥 USERS\n\n"
+    text = ""
 
     for r in rows:
         uid = r["user_id"]
         text += f"{uid}\n"
-        kb.append([InlineKeyboardButton(text=str(uid), callback_data=f"user:{uid}")])
+        kb.append([InlineKeyboardButton(str(uid), callback_data=f"user:{uid}")])
 
     await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# ================= USER CARD =================
-@dp.callback_query(F.data.startswith("user:"))
-async def user_card(c: CallbackQuery):
-    uid = int(c.data.split(":")[1])
-    u = await get_user(uid)
-
-    if not u:
-        return await c.answer("NOT FOUND")
-
-    st = "🟢" if u["expire"] > int(datetime.now().timestamp()) else "🔴"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton("BAN", callback_data=f"ban:{uid}"),
-            InlineKeyboardButton("UNBAN", callback_data=f"unban:{uid}")
-        ],
-        [
-            InlineKeyboardButton("KICK", callback_data=f"kick:{uid}"),
-            InlineKeyboardButton("RESET", callback_data=f"reset:{uid}")
-        ],
-        [InlineKeyboardButton("BACK", callback_data="adm:users")]
-    ])
-
-    await c.message.edit_text(f"👤 USER {uid}\nSTATUS:{st}", reply_markup=kb)
-
-# ================= EXPIRY NOTIFICATIONS =================
+# ================= NOTIFY =================
 async def notify():
     while True:
         conn = await db()
@@ -265,29 +246,26 @@ async def notify():
         for u in users:
             left = (u["expire"] - now) // 86400
             try:
-                if left == 3:
-                    await bot.send_message(u["user_id"], "⚠️ 3 days left")
-                elif left == 2:
-                    await bot.send_message(u["user_id"], "⚠️ 2 days left")
-                elif left == 1:
-                    await bot.send_message(u["user_id"], "⚠️ last day")
+                if left in (3,2,1):
+                    await bot.send_message(u["user_id"], f"⚠️ {left} days left")
             except:
                 pass
 
         await asyncio.sleep(3600)
 
-# ================= WEBHOOK FIX =================
+# ================= WEBHOOK =================
 async def webhook(request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return web.Response()
 
+# ================= START =================
 async def on_start(app):
     await init_db()
 
     if not PUBLIC_URL:
-        raise RuntimeError("PUBLIC_URL is NOT SET")
+        raise RuntimeError("PUBLIC_URL MISSING")
 
     url = f"{PUBLIC_URL}/webhook"
 
@@ -298,9 +276,19 @@ async def on_start(app):
 
     print("WEBHOOK OK:", url)
 
+# ================= SHUTDOWN FIX (ВАЖНО) =================
+async def on_shutdown(app):
+    try:
+        await bot.session.close()
+    except:
+        pass
+
+# ================= APP =================
 app = web.Application()
 app.router.add_post("/webhook", webhook)
+
 app.on_startup.append(on_start)
+app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=PORT)
