@@ -1,24 +1,17 @@
-import asyncpg
-from datetime import datetime
+from aiogram import F
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-pool = None
+import db
 
+ADMIN_IDS = {123}
 
-async def get_user(uid):
-    async with pool.acquire() as c:
-        return await c.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
+@dp.callback_query(F.data == "adm:users")
+async def users(c: CallbackQuery):
+    rows = await db.pool.fetch("SELECT user_id FROM users LIMIT 20")
 
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=str(r["user_id"]), callback_data=f"user:{r['user_id']}")]
+        for r in rows
+    ])
 
-async def ban_user(uid):
-    async with pool.acquire() as c:
-        await c.execute("UPDATE users SET is_banned=1 WHERE user_id=$1", uid)
-
-
-async def unban_user(uid):
-    async with pool.acquire() as c:
-        await c.execute("UPDATE users SET is_banned=0 WHERE user_id=$1", uid)
-
-
-async def reset_user(uid):
-    async with pool.acquire() as c:
-        await c.execute("UPDATE users SET expire=0 WHERE user_id=$1", uid)
+    await c.message.edit_text("👥 USERS", reply_markup=kb)
