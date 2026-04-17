@@ -21,9 +21,13 @@ from aiogram.filters import CommandStart
 TOKEN = os.getenv("BOT_TOKEN")
 DB = os.getenv("DATABASE_URL")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 PORT = int(os.getenv("PORT", 10000))
 
-ADMIN_IDS = set(map(int, os.getenv("ADMIN_IDS", "").split(",")))
+raw_admins = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = set()
+if raw_admins.strip():
+    ADMIN_IDS = set(map(int, raw_admins.split(",")))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -63,6 +67,8 @@ async def init_db():
 
 
 async def get_user(uid: int):
+    if not pool:
+        return None
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
 
@@ -78,17 +84,19 @@ def main_kb(uid):
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
-# ================= INVITE LOCK =================
+# ================= INVITE =================
 async def create_invite(uid: int):
     link = await bot.create_chat_invite_link(
-        chat_id=int(os.getenv("CHANNEL_ID")),
+        chat_id=CHANNEL_ID,
         member_limit=1,
         name=f"user_{uid}"
     )
 
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET invite=$1 WHERE user_id=$2",
-                           link.invite_link, uid)
+        await conn.execute(
+            "UPDATE users SET invite=$1 WHERE user_id=$2",
+            link.invite_link, uid
+        )
 
     return link.invite_link
 
@@ -96,11 +104,15 @@ async def create_invite(uid: int):
 # ================= START =================
 @dp.message(CommandStart())
 async def start(m: Message):
+    if not pool:
+        return
+
     u = m.from_user
 
     async with pool.acquire() as conn:
         await conn.execute("""
-        INSERT INTO users VALUES($1,$2,$3,0,0,0,0,0,NULL)
+        INSERT INTO users(user_id, username, first_name)
+        VALUES($1,$2,$3)
         ON CONFLICT DO NOTHING
         """, u.id, u.username, u.first_name)
 
@@ -114,7 +126,7 @@ async def status(m: Message):
     now = int(datetime.now().timestamp())
 
     if u and u["expire"] > now:
-        await m.answer(f"🟢 ACTIVE\n⏳ {(u['expire']-now)//86400} days left")
+        await m.answer(f"🟢 ACTIVE\n⏳ {(u['expire']-now)//86400} days")
     else:
         await m.answer("🔴 NO ACCESS")
 
@@ -185,12 +197,13 @@ async def payment_success(uid: int, plan: str, rub=0, stars=0):
     invite = await create_invite(uid)
 
     for admin in ADMIN_IDS:
-        await bot.send_message(admin,
-            f"💰 PAYMENT\nID:{uid}\nPLAN:{plan}\n₽:{rub} ⭐:{stars}"
-        )
+        try:
+            await bot.send_message(admin, f"💰 PAYMENT\nID:{uid}\nPLAN:{plan}\n₽:{rub} ⭐:{stars}")
+        except:
+            pass
 
     await bot.send_message(uid,
-        f"✅ ACCESS GRANTED\n🔗 {invite}\n⚠️ 1 user = 1 link"
+        f"✅ ACCESS GRANTED\n🔗 {invite}"
     )
 
 
@@ -201,11 +214,10 @@ async def admin(m: Message):
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 DASH", callback_data="adm:dash")],
-        [InlineKeyboardButton(text="👥 USERS", callback_data="adm:users")]
+        [InlineKeyboardButton(text="📊 DASH", callback_data="adm:dash")]
     ])
 
-    await m.answer("⚙️ ADMIN PANEL", reply_markup=kb)
+    await m.answer("⚙️ ADMIN", reply_markup=kb)
 
 
 # ================= DASH =================
@@ -218,52 +230,10 @@ async def dash(c: CallbackQuery):
             int(datetime.now().timestamp())
         )
 
-    await c.message.edit_text(f"📊 DASHBOARD\n👥 {total}\n🟢 {active}")
+    await c.message.edit_text(f"📊 DASH\n👥 {total}\n🟢 {active}")
 
 
-# ================= USERS =================
-@dp.callback_query(F.data == "adm:users")
-async def users(c: CallbackQuery):
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM users LIMIT 30")
-
-    kb = []
-    text = "👥 USERS\n\n"
-
-    for r in rows:
-        uid = r["user_id"]
-        text += f"{uid}\n"
-        kb.append([InlineKeyboardButton(text=str(uid), callback_data=f"user:{uid}")])
-
-    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-
-# ================= USER CARD =================
-@dp.callback_query(F.data.startswith("user:"))
-async def user_card(c: CallbackQuery):
-    uid = int(c.data.split(":")[1])
-    u = await get_user(uid)
-
-    if not u:
-        return await c.answer("NOT FOUND")
-
-    st = "🟢" if u["expire"] > int(datetime.now().timestamp()) else "🔴"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton("BAN", callback_data=f"ban:{uid}"),
-            InlineKeyboardButton("UNBAN", callback_data=f"unban:{uid}")
-        ],
-        [
-            InlineKeyboardButton("KICK", callback_data=f"kick:{uid}"),
-            InlineKeyboardButton("RESET", callback_data=f"reset:{uid}")
-        ]
-    ])
-
-    await c.message.edit_text(f"👤 USER {uid}\nSTATUS:{st}", reply_markup=kb)
-
-
-# ================= EXPIRY NOTIFIER =================
+# ================= NOTIFIER =================
 async def notifier():
     while True:
         try:
@@ -282,7 +252,7 @@ async def notifier():
                         pass
 
         except Exception as e:
-            logging.error(e)
+            logging.error(f"notifier error: {e}")
 
         await asyncio.sleep(3600)
 
@@ -296,23 +266,28 @@ async def webhook(request):
 
 
 async def on_start(app):
+    global pool
     await init_db()
 
     if not PUBLIC_URL:
         raise RuntimeError("PUBLIC_URL NOT SET")
 
-    url = f"{PUBLIC_URL}/webhook"
+    webhook_url = f"{PUBLIC_URL}/webhook"
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(url)
+    await bot.set_webhook(webhook_url)
 
     asyncio.create_task(notifier())
 
-    logging.info(f"WEBHOOK OK: {url}")
+    logging.info(f"WEBHOOK OK: {webhook_url}")
 
 
 async def on_shutdown(app):
-    await bot.session.close()
+    try:
+        await bot.session.close()
+    except:
+        pass
+
     if pool:
         await pool.close()
 
