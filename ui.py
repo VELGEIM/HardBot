@@ -12,7 +12,28 @@ def main_menu(name):
         f"━━━━━━━━━━━━━━\n"
         f"👇 Выберите действие"
     )
+import asyncio
 
+async def loading_animation(bot, chat_id, message_id, base_text="Загрузка"):
+    frames = [
+        "⏳ Загрузка.",
+        "⏳ Загрузка..",
+        "⏳ Загрузка...",
+        "⚡ Обработка данных",
+        "⚡ Проверка платежа",
+        "🔄 Финализация"
+    ]
+
+    for f in frames:
+        try:
+            await bot.edit_message_text(
+                f"<b>{f}</b>",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            await asyncio.sleep(0.6)
+        except:
+            pass
 
 def status_text(expire):
     now = int(datetime.now().timestamp())
