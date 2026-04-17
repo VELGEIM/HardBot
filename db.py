@@ -1,7 +1,7 @@
 import asyncpg
 import os
 
-pool = None
+pool: asyncpg.Pool | None = None
 
 
 async def init_db():
@@ -21,11 +21,24 @@ async def init_db():
         """)
 
 
-async def get_user(uid):
-    if not pool:
-        raise RuntimeError("DB pool not initialized")
-
+async def get_user(uid: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow(
-            "SELECT * FROM users WHERE user_id=$1", uid
+            "SELECT * FROM users WHERE user_id=$1",
+            uid
         )
+
+
+async def upsert_user(uid, username, first_name):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+        INSERT INTO users(user_id, username, first_name)
+        VALUES($1,$2,$3)
+        ON CONFLICT(user_id) DO UPDATE
+        SET username=$2, first_name=$3
+        """, uid, username, first_name)
+
+
+async def execute(q, *args):
+    async with pool.acquire() as conn:
+        return await conn.execute(q, *args)
