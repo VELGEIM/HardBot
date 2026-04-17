@@ -2,7 +2,14 @@ import asyncio
 import os
 import datetime
 import logging
+if not os.getenv("BOT_TOKEN"):
+    raise RuntimeError("❌ BOT_TOKEN is not set in environment variables")
 
+if not os.getenv("DATABASE_URL"):
+    raise RuntimeError("❌ DATABASE_URL is not set")
+
+if not os.getenv("PUBLIC_URL"):
+    raise RuntimeError("❌ PUBLIC_URL is not set")
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import *
