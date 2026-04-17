@@ -1,70 +1,34 @@
-from datetime import datetime
+from aiogram import F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
-def status(u):
-    now = int(datetime.now().timestamp())
-    if not u:
-        return "🔴 NO DATA"
-
-    if u["expire"] > now:
-        d = (u["expire"] - now)//86400
-        return f"🟢 ACTIVE\n⏳ {d} DAYS LEFT"
-    return "🔴 EXPIRED"
+import db
 
 
-def home(user):
-    return f"""
-🧠 HARDHUB CONTROL PANEL
-
-👤 USER: @{user.username or 'user'}
-📊 STATUS: {status(user)}
-
-━━━━━━━━━━━━━━
-⚡ CRM SYSTEM ACTIVE
-🔐 ANTI-SHARE PROTECTION ON
-📡 SUPPORT RADIO ENABLED
-━━━━━━━━━━━━━━
-"""
+def menu(uid):
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💎 Store")],
+            [KeyboardButton(text="📊 Profile")]
+        ],
+        resize_keyboard=True
+    )
 
 
-def store():
-    return """
-💎 HARDHUB STORE
+@dp.message(F.text == "/start")
+async def start(m: Message):
+    await db.exec(
+        "INSERT INTO users(user_id) VALUES($1) ON CONFLICT DO NOTHING",
+        m.from_user.id
+    )
 
-Choose your access:
-
-🟣 1 MONTH — 500₽
-🟢 6 MONTH — 2450₽
-🔵 12 MONTH — 5500₽
-
-⚡ instant unlock
-🔐 1 user = 1 link
-"""
+    await m.answer("🔥 HARDHUB PRO", reply_markup=menu(m.from_user.id))
 
 
-def profile_card(user, is_active):
-    return f"""
-👤 USER CARD
+@dp.message(F.text == "📊 Profile")
+async def profile(m: Message):
+    u = await db.fetch_user(m.from_user.id)
 
-ID: {user['user_id']}
-NAME: @{user['username']}
-
-STATUS: {"🟢 ACTIVE" if is_active else "🔴 BLOCKED"}
-
-━━━━━━━━━━━━━━
-💰 PAID: {user.get('rub_paid',0)}₽
-📦 SUB: {user.get('expire',0)}
-━━━━━━━━━━━━━━
-"""
-
-
-def admin_dashboard(total, active, income):
-    return f"""
-⚙️ CRM DASHBOARD
-
-👥 USERS: {total}
-🟢 ACTIVE: {active}
-💰 INCOME: {income}₽
-
-━━━━━━━━━━━━━━
-📡 SYSTEM ONLINE
-"""
+    if u and u["expire"] > 0:
+        await m.answer("🟢 ACTIVE SUB")
+    else:
+        await m.answer("🔴 NO SUB")
