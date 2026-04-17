@@ -1,31 +1,43 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
+
+def main_menu(name):
+    return (
+        f"🔥 <b>HARDHUB PREMIUM</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👋 Привет, <b>{name}</b>\n\n"
+        f"📦 Доступ к системе:\n"
+        f"• Закрытый контент\n"
+        f"• VIP канал\n"
+        f"• Поддержка 24/7\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👇 Выберите действие"
+    )
 
 
-def main_kb(uid, is_admin=False):
-    kb = [
-        [KeyboardButton(text="💎 Купить доступ")],
-        [KeyboardButton(text="📊 Профиль")]
-    ]
-    if is_admin:
-        kb.append([KeyboardButton(text="⚙️ CRM")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+def status_text(expire):
+    now = int(datetime.now().timestamp())
+
+    if expire > now:
+        days = (expire - now) // 86400
+        return (
+            "🟢 <b>ACTIVE SUBSCRIPTION</b>\n"
+            f"⏳ Осталось: <b>{days} дней</b>"
+        )
+
+    return "🔴 <b>NO ACTIVE SUBSCRIPTION</b>"
 
 
-def shop():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц - 500₽", callback_data="buy:1m")],
-        [InlineKeyboardButton(text="6 месяцев - 2450₽", callback_data="buy:6m")],
-        [InlineKeyboardButton(text="12 месяцев - 5500₽", callback_data="buy:12m")]
-    ])
+def pay_text(price, card):
+    return (
+        "💳 <b>PAYMENT REQUIRED</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"💰 Цена: <b>{price}₽</b>\n"
+        f"💳 Карта: <code>{card}</code>\n\n"
+        "📸 Отправьте <b>ФОТО ЧЕКА</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "⚡ Проверка вручную админом"
+    )
 
 
-def user_card(uid):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton("BAN", callback_data=f"ban:{uid}"),
-            InlineKeyboardButton("UNBAN", callback_data=f"unban:{uid}")
-        ],
-        [
-            InlineKeyboardButton("RESET", callback_data=f"reset:{uid}")
-        ]
-    ])
+def admin_panel():
+    return "⚙️ <b>ADMIN CRM PANEL</b>"
