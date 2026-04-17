@@ -1,7 +1,7 @@
 import asyncpg
 from config import DB_URL
 
-pool = None
+pool: asyncpg.Pool | None = None
 
 
 async def init_db():
@@ -26,23 +26,20 @@ async def init_db():
 
 def get_pool():
     if pool is None:
-        raise RuntimeError("DB not initialized. Call init_db first.")
+        raise RuntimeError("DB not initialized")
     return pool
 
 
-async def fetchrow(query, *args):
-    p = get_pool()
-    async with p.acquire() as conn:
-        return await conn.fetchrow(query, *args)
+async def fetchrow(q, *args):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow(q, *args)
 
 
-async def fetch(query, *args):
-    p = get_pool()
-    async with p.acquire() as conn:
-        return await conn.fetch(query, *args)
+async def fetch(q, *args):
+    async with get_pool().acquire() as conn:
+        return await conn.fetch(q, *args)
 
 
-async def execute(query, *args):
-    p = get_pool()
-    async with p.acquire() as conn:
-        return await conn.execute(query, *args)
+async def execute(q, *args):
+    async with get_pool().acquire() as conn:
+        return await conn.execute(q, *args)
