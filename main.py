@@ -13,10 +13,8 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     Update
 )
-from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 
 
@@ -40,9 +38,11 @@ PLANS = {
     "12m": {"days": 365, "rub": 5500, "stars": 2600},
 }
 
+
 # ================= DB =================
 async def db():
     return await asyncpg.connect(DB)
+
 
 async def init_db():
     conn = await db()
@@ -55,10 +55,12 @@ async def init_db():
         is_banned INT DEFAULT 0,
         rub_paid BIGINT DEFAULT 0,
         stars_paid BIGINT DEFAULT 0,
-        last_pay BIGINT DEFAULT 0
+        last_pay BIGINT DEFAULT 0,
+        invite TEXT
     )
     """)
     await conn.close()
+
 
 async def get_user(uid):
     conn = await db()
@@ -68,16 +70,32 @@ async def get_user(uid):
 
 
 # ================= KEYBOARD =================
-def user_kb(uid):
-    kb = [
+def kb(uid):
+    k = [
         [KeyboardButton(text="💎 Купить")],
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🆘 Поддержка")]
     ]
-
     if uid in ADMIN_IDS:
-        kb.append([KeyboardButton(text="⚙️ Админ")])
+        k.append([KeyboardButton(text="⚙️ Админ")])
+    return ReplyKeyboardMarkup(keyboard=k, resize_keyboard=True)
 
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+# ================= INVITES (LOCKED) =================
+async def create_locked_invite(uid: int):
+    link = await bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        member_limit=1,
+        name=f"user_{uid}"
+    )
+
+    conn = await db()
+    await conn.execute(
+        "UPDATE users SET invite=$1 WHERE user_id=$2",
+        link.invite_link, uid
+    )
+    await conn.close()
+
+    return link.invite_link
 
 
 # ================= START =================
@@ -87,12 +105,12 @@ async def start(m: Message):
 
     conn = await db()
     await conn.execute("""
-    INSERT INTO users VALUES($1,$2,$3,0,0,0,0,0)
+    INSERT INTO users VALUES($1,$2,$3,0,0,0,0,0,NULL)
     ON CONFLICT DO NOTHING
     """, u.id, u.username, u.first_name)
     await conn.close()
 
-    await m.answer("🔥 <b>HARDHUB</b>", reply_markup=user_kb(u.id))
+    await m.answer("🔥 HARDHUB", reply_markup=kb(u.id))
 
 
 # ================= STATUS =================
@@ -102,24 +120,23 @@ async def status(m: Message):
     now = int(datetime.now().timestamp())
 
     if u and u["expire"] > now:
-        await m.answer(f"🟢 Активен\n⏳ {((u['expire']-now)//86400)} дней")
+        await m.answer(f"🟢 ACTIVE\n⏳ {(u['expire']-now)//86400} days")
     else:
-        await m.answer("🔴 Нет доступа")
+        await m.answer("🔴 NO ACCESS")
 
 
-# ================= BUY =================
+# ================= BUY MENU =================
 @dp.message(F.text == "💎 Купить")
 async def buy(m: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 мес - 500₽", callback_data="buy:1m")],
-        [InlineKeyboardButton(text="6 мес - 2450₽ / 1300⭐", callback_data="buy:6m")],
-        [InlineKeyboardButton(text="12 мес - 5500₽ / 2600⭐", callback_data="buy:12m")]
+        [InlineKeyboardButton(text="1m - 500₽", callback_data="buy:1m")],
+        [InlineKeyboardButton(text="6m - 2450₽ / 1300⭐", callback_data="buy:6m")],
+        [InlineKeyboardButton(text="12m - 5500₽ / 2600⭐", callback_data="buy:12m")]
     ])
+    await m.answer("💳 Choose plan", reply_markup=kb)
 
-    await m.answer("💳 Выбери тариф:", reply_markup=kb)
 
-
-# ================= CHECK BUY =================
+# ================= ANTI ABUSE =================
 def can_buy(u):
     now = int(datetime.now().timestamp())
     if not u:
@@ -131,7 +148,7 @@ def can_buy(u):
     return True
 
 
-# ================= PAYMENT MENU =================
+# ================= BUY =================
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_plan(c: CallbackQuery):
     plan = c.data.split(":")[1]
@@ -139,13 +156,49 @@ async def buy_plan(c: CallbackQuery):
 
     u = await get_user(c.from_user.id)
     if not can_buy(u):
-        return await c.answer("⛔ Уже активна подписка", show_alert=True)
+        return await c.answer("⛔ already active", show_alert=True)
 
     await c.message.edit_text(
-        f"💳 <b>Оплата</b>\n\n"
-        f"Цена: {p['rub']}₽\n"
-        f"ИЛИ ⭐ {p['stars'] if 'stars' in p else '-'}\n\n"
-        "📸 ОТПРАВЬ ТОЛЬКО ФОТО ЧЕКА (НЕ PDF, НЕ ФАЙЛ)"
+        f"💳 <b>{p['rub']}₽</b>\n\n"
+        "📸 SEND ONLY PHOTO (NO PDF / NO FILE)\n"
+    )
+
+
+# ================= PAYMENT PROCESS =================
+async def payment_success(uid, plan, rub=0, stars=0):
+    p = PLANS[plan]
+    now = int(datetime.now().timestamp())
+
+    conn = await db()
+    u = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
+
+    expire = max(u["expire"] if u else 0, now) + p["days"] * 86400
+
+    await conn.execute("""
+    UPDATE users
+    SET expire=$1,
+        last_pay=$2,
+        rub_paid=rub_paid+$3,
+        stars_paid=stars_paid+$4
+    WHERE user_id=$5
+    """, expire, now, rub, stars, uid)
+
+    await conn.close()
+
+    invite = await create_locked_invite(uid)
+
+    for admin in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin,
+                f"💰 PAYMENT\nID: {uid}\nPLAN: {plan}\n₽:{rub} ⭐:{stars}"
+            )
+        except:
+            pass
+
+    await bot.send_message(
+        uid,
+        f"✅ PAID CONFIRMED\n\n🔗 {invite}\n\n⚠️ 1 link = 1 user only"
     )
 
 
@@ -156,12 +209,11 @@ async def admin(m: Message):
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Дашборд", callback_data="adm:dash")],
-        [InlineKeyboardButton(text="👥 Юзеры", callback_data="adm:users")],
-        [InlineKeyboardButton(text="💰 Доход", callback_data="adm:money")]
+        [InlineKeyboardButton(text="📊 Dashboard", callback_data="adm:dash")],
+        [InlineKeyboardButton(text="👥 Users", callback_data="adm:users")]
     ])
 
-    await m.answer("⚙️ ADMIN PANEL", reply_markup=kb)
+    await m.answer("⚙️ ADMIN", reply_markup=kb)
 
 
 # ================= DASH =================
@@ -170,12 +222,15 @@ async def dash(c: CallbackQuery):
     conn = await db()
 
     users = await conn.fetchval("SELECT COUNT(*) FROM users")
-    active = await conn.fetchval("SELECT COUNT(*) FROM users WHERE expire > $1", int(datetime.now().timestamp()))
+    active = await conn.fetchval(
+        "SELECT COUNT(*) FROM users WHERE expire > $1",
+        int(datetime.now().timestamp())
+    )
 
     await conn.close()
 
     await c.message.edit_text(
-        f"📊 DASHBOARD\n\n👥 {users}\n🟢 {active}"
+        f"📊 DASH\n\n👥 {users}\n🟢 {active}"
     )
 
 
@@ -183,52 +238,102 @@ async def dash(c: CallbackQuery):
 @dp.callback_query(F.data == "adm:users")
 async def users(c: CallbackQuery):
     conn = await db()
-    rows = await conn.fetch("SELECT user_id, expire FROM users LIMIT 20")
+    rows = await conn.fetch("SELECT user_id FROM users LIMIT 30")
     await conn.close()
 
+    kb = []
     text = "👥 USERS\n\n"
+
     for r in rows:
-        text += f"{r['user_id']} | {r['expire']}\n"
+        uid = r["user_id"]
+        text += f"{uid}\n"
+        kb.append([InlineKeyboardButton(text=f"👤 {uid}", callback_data=f"user:{uid}")])
 
-    await c.message.edit_text(text)
+    await c.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
-# ================= MONEY =================
-@dp.callback_query(F.data == "adm:money")
-async def money(c: CallbackQuery):
-    conn = await db()
+# ================= USER CARD =================
+@dp.callback_query(F.data.startswith("user:"))
+async def user_card(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+    u = await get_user(uid)
 
-    r = await conn.fetchrow("""
-    SELECT SUM(rub_paid) rub, SUM(stars_paid) stars FROM users
-    """)
+    if not u:
+        return await c.answer("NOT FOUND")
 
-    await conn.close()
+    st = "🟢" if u["expire"] > int(datetime.now().timestamp()) else "🔴"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⛔ BAN", callback_data=f"ban:{uid}"),
+            InlineKeyboardButton(text="🔓 UNBAN", callback_data=f"unban:{uid}")
+        ],
+        [
+            InlineKeyboardButton(text="💥 KICK", callback_data=f"kick:{uid}"),
+            InlineKeyboardButton(text="📉 RESET", callback_data=f"reset:{uid}")
+        ],
+        [InlineKeyboardButton(text="⬅️ BACK", callback_data="adm:users")]
+    ])
 
     await c.message.edit_text(
-        f"💰 ДОХОД\n\n₽ {r['rub'] or 0}\n⭐ {r['stars'] or 0}"
+        f"👤 USER\n\nID: {uid}\nSTATUS: {st}",
+        reply_markup=kb
     )
 
 
-# ================= AUTO KICK =================
-async def watcher():
-    while True:
-        conn = await db()
-        now = int(datetime.now().timestamp())
+# ================= ACTIONS =================
+@dp.callback_query(F.data.startswith("ban:"))
+async def ban(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
 
-        users = await conn.fetch("SELECT user_id, expire FROM users")
+    conn = await db()
+    await conn.execute("UPDATE users SET is_banned=1 WHERE user_id=$1", uid)
+    await conn.close()
 
-        for u in users:
-            if u["expire"] and u["expire"] <= now:
-                try:
-                    await bot.ban_chat_member(CHANNEL_ID, u["user_id"])
-                    await bot.unban_chat_member(CHANNEL_ID, u["user_id"])
-                except:
-                    pass
+    try:
+        await bot.ban_chat_member(CHANNEL_ID, uid)
+    except:
+        pass
 
-                await conn.execute("UPDATE users SET expire=0 WHERE user_id=$1", u["user_id"])
+    await c.answer("BANNED")
 
-        await conn.close()
-        await asyncio.sleep(3600)
+
+@dp.callback_query(F.data.startswith("unban:"))
+async def unban(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+
+    conn = await db()
+    await conn.execute("UPDATE users SET is_banned=0 WHERE user_id=$1", uid)
+    await conn.close()
+
+    try:
+        await bot.unban_chat_member(CHANNEL_ID, uid)
+    except:
+        pass
+
+    await c.answer("UNBANNED")
+
+
+@dp.callback_query(F.data.startswith("kick:"))
+async def kick(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+    try:
+        await bot.ban_chat_member(CHANNEL_ID, uid)
+        await bot.unban_chat_member(CHANNEL_ID, uid)
+    except:
+        pass
+    await c.answer("KICKED")
+
+
+@dp.callback_query(F.data.startswith("reset:"))
+async def reset(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+
+    conn = await db()
+    await conn.execute("UPDATE users SET expire=0 WHERE user_id=$1", uid)
+    await conn.close()
+
+    await c.answer("RESET")
 
 
 # ================= WEBHOOK =================
@@ -242,15 +347,12 @@ async def webhook(request):
 async def on_start(app):
     await init_db()
 
-    if not BASE_URL:
-        raise Exception("NO RENDER URL")
-
     url = BASE_URL + "/webhook"
 
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(url)
 
-    asyncio.create_task(watcher())
+    print("WEBHOOK:", url)
 
 
 app = web.Application()
