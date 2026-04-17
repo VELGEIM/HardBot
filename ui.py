@@ -1,34 +1,40 @@
-from aiogram import F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 
-import db
+
+def main_menu(uid: int, is_admin: bool):
+    kb = [
+        [KeyboardButton(text="💎 Купить доступ")],
+        [KeyboardButton(text="📊 Мой профиль")],
+        [KeyboardButton(text="🆘 Поддержка")]
+    ]
+
+    if is_admin:
+        kb.append([KeyboardButton(text="⚙️ CRM Панель")])
+
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
-def menu(uid):
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💎 Store")],
-            [KeyboardButton(text="📊 Profile")]
+def shop():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 1 месяц — 500₽", callback_data="buy:1m")],
+        [InlineKeyboardButton(text="⚡ 6 месяцев — 2450₽", callback_data="buy:6m")],
+        [InlineKeyboardButton(text="👑 12 месяцев — 5500₽", callback_data="buy:12m")]
+    ])
+
+
+def user_card(uid, status):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⛔ BAN", callback_data=f"ban:{uid}"),
+            InlineKeyboardButton(text="✅ UNBAN", callback_data=f"unban:{uid}")
         ],
-        resize_keyboard=True
-    )
-
-
-@dp.message(F.text == "/start")
-async def start(m: Message):
-    await db.exec(
-        "INSERT INTO users(user_id) VALUES($1) ON CONFLICT DO NOTHING",
-        m.from_user.id
-    )
-
-    await m.answer("🔥 HARDHUB PRO", reply_markup=menu(m.from_user.id))
-
-
-@dp.message(F.text == "📊 Profile")
-async def profile(m: Message):
-    u = await db.fetch_user(m.from_user.id)
-
-    if u and u["expire"] > 0:
-        await m.answer("🟢 ACTIVE SUB")
-    else:
-        await m.answer("🔴 NO SUB")
+        [
+            InlineKeyboardButton(text="💣 RESET", callback_data=f"reset:{uid}")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ BACK", callback_data="adm:users")
+        ]
+    ])
