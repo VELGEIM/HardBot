@@ -5,39 +5,51 @@ import logging
 import sys
 from datetime import datetime
 
+from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup,
-    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
+    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton,
+    LabeledPrice, Update
 )
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# ================= CONFIGURATION =================
+# ================= CONFIG =================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 CARD = os.getenv("CARD_NUMBER", "0000 0000 0000 0000")
-PRICE = int(os.getenv("PRICE", "500"))
-DAYS = 30
-LOCK_DAYS = 27
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL")
+WEBHOOK_URL = f"{BASE_URL}/webhook"
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
+# ================= TARIFS =================
+PLANS = {
+    "1m": {"days": 30, "price": 500, "stars": 250},
+    "6m": {"days": 180, "price": 2750, "stars": 1300},
+    "12m": {"days": 365, "price": 5500, "stars": 2600},
+}
+
+LOCK_DAYS = 27
+
+# ================= STATES =================
 class UserState(StatesGroup):
-    wait_screenshot = State()
-    in_support = State()
+    wait_payment = State()
+    support = State()
 
-class AdminState(StatesGroup):
-    wait_id_search = State()
-
-# ================= DATABASE =================
+# ================= DB =================
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
@@ -46,211 +58,208 @@ async def init_db():
             username TEXT,
             first_name TEXT,
             expire BIGINT DEFAULT 0,
-            is_banned INTEGER DEFAULT 0
+            is_banned INT DEFAULT 0
         )
     """)
     await conn.close()
 
-async def get_user_data(uid):
+async def get_user(uid):
     conn = await asyncpg.connect(DATABASE_URL)
-    row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", uid)
+    row = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
     await conn.close()
     return row
 
-# ================= KEYBOARDS =================
-def main_reply_kb(uid):
-    buttons = [
-        [KeyboardButton(text="💎 Оформить подписку"), KeyboardButton(text="📊 Мой статус")],
-        [KeyboardButton(text="🆘 Техподдержка")]
+# ================= KEYBOARD =================
+def kb(uid):
+    k = [
+        [KeyboardButton(text="💎 Купить"), KeyboardButton(text="📊 Статус")],
+        [KeyboardButton(text="🆘 Поддержка")]
     ]
     if uid in ADMIN_IDS:
-        buttons.append([KeyboardButton(text="⚙️ Админ-Центр")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        k.append([KeyboardButton(text="⚙️ Админ")])
+    return ReplyKeyboardMarkup(keyboard=k, resize_keyboard=True)
 
-# ================= USER FLOW =================
-
+# ================= START =================
 @dp.message(CommandStart())
-@dp.message(StateFilter(None))
-async def welcome_handler(message: Message, state: FSMContext):
+async def start(message: Message):
     u = message.from_user
 
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
-        INSERT INTO users (user_id, username, first_name)
-        VALUES ($1, $2, $3)
+        INSERT INTO users(user_id, username, first_name)
+        VALUES($1,$2,$3)
         ON CONFLICT (user_id)
-        DO UPDATE SET username = $2, first_name = $3
+        DO UPDATE SET username=$2, first_name=$3
     """, u.id, u.username, u.first_name)
     await conn.close()
 
-    welcome_text = (
-        f"<b>🔥 VIP Gallery</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 {u.first_name}, добро пожаловать!\n\n"
-        f"💎 Подписка даёт:\n"
-        f"• доступ на {DAYS} дней\n"
-        f"• приватный канал\n"
-        f"• поддержку\n\n"
-        f"⚡ Быстро • Просто • Автоматически\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
+    await message.answer("🔥 VIP бот", reply_markup=kb(u.id))
 
-    await message.answer(welcome_text, reply_markup=main_reply_kb(u.id))
+# ================= STATUS =================
+@dp.message(F.text == "📊 Статус")
+async def status(message: Message):
+    u = await get_user(message.from_user.id)
+    exp = u["expire"] if u else 0
 
-@dp.message(F.text == "📊 Мой статус")
-async def status_handler(message: Message, state: FSMContext):
-    await state.clear()
-    res = await get_user_data(message.from_user.id)
-    exp = res['expire'] if res else 0
+    now = int(datetime.now().timestamp())
 
-    if exp > datetime.now().timestamp():
-        dt = datetime.fromtimestamp(exp).strftime('%d.%m.%Y %H:%M')
-        await message.answer(f"🟢 Активен до {dt}")
+    if exp > now:
+        days = (exp - now)//86400
+        await message.answer(f"🟢 Активна\nОсталось: {days} дн")
     else:
-        await message.answer("🔴 Подписка не активна")
+        await message.answer("🔴 Нет подписки")
 
-# ================= BUY =================
+# ================= BUY SYSTEM =================
+@dp.message(F.text == "💎 Купить")
+async def buy(message: Message, state: FSMContext):
+    u = await get_user(message.from_user.id)
+    exp = u["expire"] if u else 0
 
-@dp.message(F.text == "💎 Оформить подписку")
-async def buy_handler(message: Message, state: FSMContext):
-    await state.clear()
+    now = int(datetime.now().timestamp())
+    days_left = (exp - now)//86400 if exp > now else 0
 
-    pay_text = (
-        f"<b>💳 Оплата</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 {PRICE} ₽\n"
-        f"💳 <code>{CARD}</code>\n"
-        f"⭐ 250 Stars\n\n"
-        f"<b>ВАЖНО:</b>\n"
-        f"Отправьте ФОТО чека!\n"
-        f"❌ НЕ файл\n❌ НЕ PDF\n✔ Только фото"
-    )
+    # ❌ ЛОК ПРОДЛЕНИЯ
+    if days_left > 0:
+        if days_left > 30:
+            return await message.answer("❌ Долгосрочная подписка активна до окончания")
+        if days_left >= LOCK_DAYS:
+            return await message.answer("⏳ Продление пока недоступно")
 
-    await state.set_state(UserState.wait_screenshot)
+    await state.set_state(UserState.wait_payment)
 
     await message.answer(
-        pay_text,
+        "Выберите тариф:\n"
+        "1m / 6m / 12m / ⭐",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="💳 Оплатил (карта)")],
-                [KeyboardButton(text="⭐ Оплатить Stars")],
-                [KeyboardButton(text="⬅️ Отмена")]
+                [KeyboardButton(text="1 месяц")],
+                [KeyboardButton(text="6 месяцев")],
+                [KeyboardButton(text="12 месяцев")],
+                [KeyboardButton(text="⭐ Stars")]
             ],
             resize_keyboard=True
         )
     )
 
-# ================= STARS =================
+# ================= PLAN SELECT =================
+@dp.message(UserState.wait_payment, F.text.in_(["1 месяц","6 месяцев","12 месяцев"]))
+async def select_plan(message: Message, state: FSMContext):
 
-@dp.message(F.text == "⭐ Оплатить Stars")
-async def stars_payment(message: Message):
-    prices = [LabeledPrice(label="Подписка", amount=25000)]
+    mapping = {
+        "1 месяц":"1m",
+        "6 месяцев":"6m",
+        "12 месяцев":"12m"
+    }
+
+    plan = mapping[message.text]
+    await state.update_data(plan=plan)
+
+    p = PLANS[plan]
+
+    await message.answer(
+        f"💳 {p['price']}₽\n"
+        f"Карта: {CARD}\n\n"
+        "Отправьте ФОТО чека"
+    )
+
+# ================= STARS =================
+@dp.message(F.text == "⭐ Stars")
+async def stars(message: Message):
+    await message.answer(
+        "Выберите Stars тариф:\n"
+        "⭐ 1m / 6m / 12m"
+    )
+
+@dp.message(F.text.startswith("⭐"))
+async def stars_invoice(message: Message):
+
+    mapping = {
+        "⭐ 1m":"1m",
+        "⭐ 6m":"6m",
+        "⭐ 12m":"12m"
+    }
+
+    if message.text not in mapping:
+        return
+
+    plan = mapping[message.text]
+    p = PLANS[plan]
+
+    prices = [LabeledPrice(label="VIP", amount=p["stars"]*100)]
 
     await bot.send_invoice(
         message.chat.id,
-        title="VIP доступ",
-        description="30 дней доступа",
-        payload="stars",
+        title="VIP",
+        description=f"{p['days']} дней",
+        payload=plan,
         provider_token="",
         currency="XTR",
         prices=prices
     )
 
-@dp.pre_checkout_query()
-async def pre_checkout(pre_checkout_query):
-    await pre_checkout.answer(ok=True)
-
 @dp.message(F.successful_payment)
-async def successful_payment(message: Message):
+async def success(message: Message):
+    plan = message.successful_payment.invoice_payload
+    p = PLANS.get(plan, PLANS["1m"])
+
     uid = message.from_user.id
-    res = await get_user_data(uid)
+    u = await get_user(uid)
 
-    new_e = max(res['expire'] if res else 0, int(datetime.now().timestamp())) + (DAYS * 86400)
+    new_exp = max(u["expire"] if u else 0, int(datetime.now().timestamp())) + p["days"]*86400
 
     conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("UPDATE users SET expire=$1 WHERE user_id=$2", new_e, uid)
+    await conn.execute("UPDATE users SET expire=$1 WHERE user_id=$2", new_exp, uid)
     await conn.close()
 
     link = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
 
-    await message.answer(f"✅ Оплата прошла!\n{link.invite_link}")
+    await message.answer(f"✅ Доступ:\n{link.invite_link}")
 
-# ================= SCREENSHOT =================
+# ================= AUTO BAN SYSTEM =================
+async def watcher():
+    while True:
+        conn = await asyncpg.connect(DATABASE_URL)
+        now = int(datetime.now().timestamp())
 
-@dp.message(UserState.wait_screenshot, F.photo)
-async def photo_handler(message: Message, state: FSMContext):
-    for admin in ADMIN_IDS:
-        await bot.send_photo(
-            admin,
-            message.photo[-1].file_id,
-            caption=f"Чек от {message.from_user.id}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅", callback_data=f"ok:{message.from_user.id}"),
-                    InlineKeyboardButton(text="❌", callback_data=f"no:{message.from_user.id}")
-                ]
-            ])
-        )
+        rows = await conn.fetch("SELECT * FROM users")
 
-    await message.answer("Чек отправлен")
-    await state.clear()
+        for r in rows:
+            uid = r["user_id"]
+            exp = r["expire"]
 
-@dp.message(UserState.wait_screenshot)
-async def wrong_format(message: Message):
-    await message.answer("❌ Только фото чека!")
+            if exp <= now and exp > 0:
+                try:
+                    await bot.ban_chat_member(CHANNEL_ID, uid)
+                    await bot.unban_chat_member(CHANNEL_ID, uid)
+                    await bot.send_message(uid, "❌ подписка закончилась")
+                except:
+                    pass
 
-# ================= SUPPORT =================
+                await conn.execute("UPDATE users SET expire=0 WHERE user_id=$1", uid)
 
-@dp.message(F.text == "🆘 Техподдержка")
-async def support_init(message: Message, state: FSMContext):
-    await state.set_state(UserState.in_support)
-    await message.answer("Напишите проблему")
+        await conn.close()
+        await asyncio.sleep(3600)
 
-@dp.message(UserState.in_support)
-async def support_handler(message: Message):
-    for admin in ADMIN_IDS:
-        if message.text:
-            await bot.send_message(admin, f"SUPPORT {message.from_user.id}\n{message.text}")
-        elif message.photo:
-            await bot.send_photo(admin, message.photo[-1].file_id)
+# ================= WEBHOOK =================
+async def handle(request):
+    data = await request.json()
+    update = Update(**data)
+    await dp.feed_update(bot, update)
+    return web.Response()
 
-    await message.answer("Отправлено")
-
-# ================= ADMIN =================
-
-@dp.message(F.text == "⚙️ Админ-Центр")
-async def admin_panel(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Список", callback_data="list")]
-    ])
-
-    await message.answer("Админ панель", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("ok:"))
-async def approve(call: CallbackQuery):
-    uid = int(call.data.split(":")[1])
-
-    res = await get_user_data(uid)
-    new_e = int(datetime.now().timestamp()) + (DAYS * 86400)
-
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("UPDATE users SET expire=$1 WHERE user_id=$2", new_e, uid)
-    await conn.close()
-
-    link = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
-
-    await bot.send_message(uid, f"Доступ:\n{link.invite_link}")
-    await call.answer("OK")
-
-# ================= START =================
-
-async def main():
+async def on_start(app):
     await init_db()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
+    asyncio.create_task(watcher())
+    print("BOT STARTED")
+
+async def on_stop(app):
+    await bot.delete_webhook()
+
+app = web.Application()
+app.router.add_post("/webhook", handle)
+app.on_startup.append(on_start)
+app.on_shutdown.append(on_stop)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
