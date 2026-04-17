@@ -1,9 +1,14 @@
-async def revoke_old_links(bot, channel_id, uid):
-    try:
-        await bot.create_chat_invite_link(
-            channel_id,
-            member_limit=1,
-            name=f"user_{uid}_new"
-        )
-    except:
-        pass
+import time
+import db
+
+cache = {}
+
+def check_user(uid):
+    now = time.time()
+
+    if uid in cache:
+        if now - cache[uid] < 5:
+            return False
+
+    cache[uid] = now
+    return True
