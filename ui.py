@@ -1,35 +1,38 @@
-import asyncio
+def home(name):
+    return f"""
+🎬 <b>HARDHUB PREMIUM</b>
+
+Привет, <b>{name}</b>
+
+━━━━━━━━━━━━
+🔥 VIP Content System
+⚡ Instant Access
+🛡 Secure CRM Access
+━━━━━━━━━━━━
+
+📌 Выберите действие:
+"""
 
 
-def main_ui(name):
-    return (
-        f"🔥 <b>HARDHUB PREMIUM</b>\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👋 Привет, <b>{name}</b>\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"💎 VIP система доступа\n"
-        f"⚡ Авто-выдача подписки\n"
-        f"📡 Поддержка 24/7\n"
-    )
+def pay():
+    return """
+💳 <b>PAYMENT SCREEN</b>
+
+💰 Подписка: PREMIUM
+📆 Доступ: 30 дней
+
+📸 Отправьте чек для проверки
+"""
 
 
-def status_ui(exp):
-    return f"🟢 ACTIVE\n⏳ до: {exp}" if exp else "🔴 NO ACCESS"
+def dashboard(active, exp):
+    return f"""
+📊 <b>USER DASHBOARD</b>
+
+Статус: {'🟢 ACTIVE' if active else '🔴 OFF'}
+До: {exp}
+"""
 
 
-async def loading(bot, chat_id, msg_id):
-    frames = [
-        "⏳ Загрузка.",
-        "⏳ Загрузка..",
-        "⏳ Загрузка...",
-        "⚡ Проверка",
-        "🔄 Обработка",
-        "🚀 Готово"
-    ]
-
-    for f in frames:
-        try:
-            await bot.edit_message_text(f"<b>{f}</b>", chat_id, msg_id)
-            await asyncio.sleep(0.5)
-        except:
-            pass
+def loading():
+    return ["⏳", "⏳.", "⏳..", "⏳..."]
