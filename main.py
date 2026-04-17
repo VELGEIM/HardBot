@@ -9,8 +9,9 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup,
-    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton,
+    Message, CallbackQuery,
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, Update
 )
 from aiogram.filters import CommandStart
@@ -21,18 +22,27 @@ from aiogram.fsm.state import State, StatesGroup
 
 # ================= CONFIG =================
 TOKEN = os.getenv("BOT_TOKEN")
+
+# 👉 несколько админов
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
+
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 CARD = os.getenv("CARD_NUMBER", "0000 0000 0000 0000")
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
-BASE_URL = os.getenv("RENDER_EXTERNAL_URL")
-WEBHOOK_URL = f"{BASE_URL}/webhook"
+BASE_URL = os.getenv("PUBLIC_URL")  # 👈 ВАЖНО: ты задаёшь сам в Render
+WEBHOOK_URL = BASE_URL.rstrip("/") + "/webhook"
+
+PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 
 # ================= TARIFS =================
@@ -46,7 +56,7 @@ LOCK_DAYS = 27
 
 # ================= STATES =================
 class UserState(StatesGroup):
-    wait_payment = State()
+    wait_photo = State()
     support = State()
 
 # ================= DB =================
@@ -70,14 +80,14 @@ async def get_user(uid):
     return row
 
 # ================= KEYBOARD =================
-def kb(uid):
-    k = [
+def main_kb(uid):
+    kb = [
         [KeyboardButton(text="💎 Купить"), KeyboardButton(text="📊 Статус")],
         [KeyboardButton(text="🆘 Поддержка")]
     ]
     if uid in ADMIN_IDS:
-        k.append([KeyboardButton(text="⚙️ Админ")])
-    return ReplyKeyboardMarkup(keyboard=k, resize_keyboard=True)
+        kb.append([KeyboardButton(text="⚙️ Админ")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 # ================= START =================
 @dp.message(CommandStart())
@@ -88,28 +98,25 @@ async def start(message: Message):
     await conn.execute("""
         INSERT INTO users(user_id, username, first_name)
         VALUES($1,$2,$3)
-        ON CONFLICT (user_id)
-        DO UPDATE SET username=$2, first_name=$3
+        ON CONFLICT DO NOTHING
     """, u.id, u.username, u.first_name)
     await conn.close()
 
-    await message.answer("🔥 VIP бот", reply_markup=kb(u.id))
+    await message.answer("🔥 VIP Bot", reply_markup=main_kb(u.id))
 
 # ================= STATUS =================
 @dp.message(F.text == "📊 Статус")
 async def status(message: Message):
     u = await get_user(message.from_user.id)
     exp = u["expire"] if u else 0
-
     now = int(datetime.now().timestamp())
 
     if exp > now:
-        days = (exp - now)//86400
-        await message.answer(f"🟢 Активна\nОсталось: {days} дн")
+        await message.answer(f"🟢 Активна\nОсталось: {(exp-now)//86400} дней")
     else:
         await message.answer("🔴 Нет подписки")
 
-# ================= BUY SYSTEM =================
+# ================= BUY =================
 @dp.message(F.text == "💎 Купить")
 async def buy(message: Message, state: FSMContext):
     u = await get_user(message.from_user.id)
@@ -118,18 +125,15 @@ async def buy(message: Message, state: FSMContext):
     now = int(datetime.now().timestamp())
     days_left = (exp - now)//86400 if exp > now else 0
 
-    # ❌ ЛОК ПРОДЛЕНИЯ
+    # 🔒 LOCK
     if days_left > 0:
         if days_left > 30:
-            return await message.answer("❌ Долгосрочная подписка активна до окончания")
+            return await message.answer("❌ Долгосрочная подписка активна")
         if days_left >= LOCK_DAYS:
-            return await message.answer("⏳ Продление пока недоступно")
-
-    await state.set_state(UserState.wait_payment)
+            return await message.answer("⏳ Продление недоступно")
 
     await message.answer(
-        "Выберите тариф:\n"
-        "1m / 6m / 12m / ⭐",
+        "Выберите тариф:\n1m / 6m / 12m / ⭐ Stars",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="1 месяц")],
@@ -140,55 +144,53 @@ async def buy(message: Message, state: FSMContext):
             resize_keyboard=True
         )
     )
+    await state.set_state(UserState.wait_photo)
 
-# ================= PLAN SELECT =================
-@dp.message(UserState.wait_payment, F.text.in_(["1 месяц","6 месяцев","12 месяцев"]))
-async def select_plan(message: Message, state: FSMContext):
+# ================= PLAN =================
+@dp.message(UserState.wait_photo, F.text.in_(["1 месяц","6 месяцев","12 месяцев"]))
+async def plan(message: Message, state: FSMContext):
 
-    mapping = {
+    mp = {
         "1 месяц":"1m",
         "6 месяцев":"6m",
         "12 месяцев":"12m"
     }
 
-    plan = mapping[message.text]
-    await state.update_data(plan=plan)
-
+    plan = mp[message.text]
     p = PLANS[plan]
+
+    await state.update_data(plan=plan)
 
     await message.answer(
         f"💳 {p['price']}₽\n"
         f"Карта: {CARD}\n\n"
-        "Отправьте ФОТО чека"
+        "Отправьте ФОТО ЧЕКА (НЕ PDF, НЕ ФАЙЛ)"
     )
 
 # ================= STARS =================
 @dp.message(F.text == "⭐ Stars")
 async def stars(message: Message):
-    await message.answer(
-        "Выберите Stars тариф:\n"
-        "⭐ 1m / 6m / 12m"
-    )
+    await message.answer("Выберите: ⭐ 1m / 6m / 12m")
 
 @dp.message(F.text.startswith("⭐"))
-async def stars_invoice(message: Message):
+async def stars_buy(message: Message):
 
-    mapping = {
+    mp = {
         "⭐ 1m":"1m",
         "⭐ 6m":"6m",
         "⭐ 12m":"12m"
     }
 
-    if message.text not in mapping:
+    if message.text not in mp:
         return
 
-    plan = mapping[message.text]
+    plan = mp[message.text]
     p = PLANS[plan]
 
     prices = [LabeledPrice(label="VIP", amount=p["stars"]*100)]
 
     await bot.send_invoice(
-        message.chat.id,
+        chat_id=message.chat.id,
         title="VIP",
         description=f"{p['days']} дней",
         payload=plan,
@@ -198,9 +200,9 @@ async def stars_invoice(message: Message):
     )
 
 @dp.message(F.successful_payment)
-async def success(message: Message):
+async def paid(message: Message):
     plan = message.successful_payment.invoice_payload
-    p = PLANS.get(plan, PLANS["1m"])
+    p = PLANS[plan]
 
     uid = message.from_user.id
     u = await get_user(uid)
@@ -215,27 +217,39 @@ async def success(message: Message):
 
     await message.answer(f"✅ Доступ:\n{link.invite_link}")
 
-# ================= AUTO BAN SYSTEM =================
+# ================= SUPPORT =================
+@dp.message(F.text == "🆘 Поддержка")
+async def support(message: Message):
+    await message.answer("Напишите сообщение админу")
+
+@dp.message(F.text)
+async def forward_support(message: Message):
+    if message.text.startswith("💎") or message.text.startswith("📊"):
+        return
+
+    for admin in ADMIN_IDS:
+        await bot.send_message(
+            admin,
+            f"📩 SUPPORT\nID: {message.from_user.id}\n\n{message.text}"
+        )
+
+# ================= AUTO EXPIRE =================
 async def watcher():
     while True:
         conn = await asyncpg.connect(DATABASE_URL)
         now = int(datetime.now().timestamp())
 
-        rows = await conn.fetch("SELECT * FROM users")
+        users = await conn.fetch("SELECT * FROM users")
 
-        for r in rows:
-            uid = r["user_id"]
-            exp = r["expire"]
-
-            if exp <= now and exp > 0:
+        for u in users:
+            if u["expire"] > 0 and u["expire"] <= now:
                 try:
-                    await bot.ban_chat_member(CHANNEL_ID, uid)
-                    await bot.unban_chat_member(CHANNEL_ID, uid)
-                    await bot.send_message(uid, "❌ подписка закончилась")
+                    await bot.ban_chat_member(CHANNEL_ID, u["user_id"])
+                    await bot.unban_chat_member(CHANNEL_ID, u["user_id"])
                 except:
                     pass
 
-                await conn.execute("UPDATE users SET expire=0 WHERE user_id=$1", uid)
+                await conn.execute("UPDATE users SET expire=0 WHERE user_id=$1", u["user_id"])
 
         await conn.close()
         await asyncio.sleep(3600)
@@ -249,17 +263,14 @@ async def handle(request):
 
 async def on_start(app):
     await init_db()
-    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
     asyncio.create_task(watcher())
     print("BOT STARTED")
-
-async def on_stop(app):
-    await bot.delete_webhook()
 
 app = web.Application()
 app.router.add_post("/webhook", handle)
 app.on_startup.append(on_start)
-app.on_shutdown.append(on_stop)
 
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    web.run_app(app, host="0.0.0.0", port=PORT)
