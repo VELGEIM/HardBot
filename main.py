@@ -1,9 +1,17 @@
 import asyncio
 import asyncpg
 import os
-import logging
 import sys
-from datetime import datetime
+import socket
+
+LOCK_FILE = "/tmp/bot.lock"
+
+if os.path.exists(LOCK_FILE):
+    print("Bot already running")
+    sys.exit()
+
+with open(LOCK_FILE, "w") as f:
+    f.write(str(os.getpid()))
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -222,6 +230,6 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-
+os.remove("/tmp/bot.lock")
 if __name__ == "__main__":
     asyncio.run(main())
